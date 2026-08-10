@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from shipyard import __version__
+
 ROOT = Path(__file__).parents[1]
 SCANNER = ROOT / "scripts/scan_tracked_secrets.py"
 CHECKSUMS = ROOT / "scripts/write_checksums.py"
@@ -70,8 +72,10 @@ def test_checksum_writer_is_deterministic_and_excludes_its_output(tmp_path):
 
 
 def test_release_artifact_resolver_uses_canonical_version_and_exact_build_outputs(tmp_path):
-    (tmp_path / "gary_shipyard-0.3.0-py3-none-any.whl").write_bytes(b"wheel")
-    (tmp_path / "gary_shipyard-0.3.0.tar.gz").write_bytes(b"sdist")
+    wheel = f"gary_shipyard-{__version__}-py3-none-any.whl"
+    sdist = f"gary_shipyard-{__version__}.tar.gz"
+    (tmp_path / wheel).write_bytes(b"wheel")
+    (tmp_path / sdist).write_bytes(b"sdist")
 
     result = subprocess.run(
         [sys.executable, str(RELEASE_ARTIFACTS), "--directory", str(tmp_path)],
@@ -81,18 +85,20 @@ def test_release_artifact_resolver_uses_canonical_version_and_exact_build_output
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
-        "SHIPYARD_VERSION=0.3.0",
-        "SHIPYARD_WHEEL=gary_shipyard-0.3.0-py3-none-any.whl",
-        "SHIPYARD_SDIST=gary_shipyard-0.3.0.tar.gz",
-        "SHIPYARD_RUNTIME_SBOM=shipyard-0.3.0-runtime.cdx.json",
-        "SHIPYARD_BUILD_SBOM=shipyard-0.3.0-build.cdx.json",
+        f"SHIPYARD_VERSION={__version__}",
+        f"SHIPYARD_WHEEL={wheel}",
+        f"SHIPYARD_SDIST={sdist}",
+        f"SHIPYARD_RUNTIME_SBOM=shipyard-{__version__}-runtime.cdx.json",
+        f"SHIPYARD_BUILD_SBOM=shipyard-{__version__}-build.cdx.json",
     ]
 
 
 def test_release_artifact_resolver_rejects_ambiguous_build_outputs(tmp_path):
-    (tmp_path / "gary_shipyard-0.3.0-py3-none-any.whl").write_bytes(b"wheel")
-    (tmp_path / "gary_shipyard-0.3.0-1-py3-none-any.whl").write_bytes(b"duplicate")
-    (tmp_path / "gary_shipyard-0.3.0.tar.gz").write_bytes(b"sdist")
+    (tmp_path / f"gary_shipyard-{__version__}-py3-none-any.whl").write_bytes(b"wheel")
+    (tmp_path / f"gary_shipyard-{__version__}-1-py3-none-any.whl").write_bytes(
+        b"duplicate"
+    )
+    (tmp_path / f"gary_shipyard-{__version__}.tar.gz").write_bytes(b"sdist")
 
     result = subprocess.run(
         [sys.executable, str(RELEASE_ARTIFACTS), "--directory", str(tmp_path)],

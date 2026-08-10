@@ -6,6 +6,10 @@ from shipyard import __version__
 from shipyard.identity import package_version
 
 
+def test_distribution_metadata_matches_source_version() -> None:
+    assert importlib.metadata.version("gary-shipyard") == __version__
+
+
 def test_package_version_uses_the_published_distribution_name(monkeypatch) -> None:
     requested = []
 

@@ -1,8 +1,10 @@
 # Changelog
 
-All notable changes to Shipyard will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project intends to use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) after the pre-1.0 API stabilizes.
+All notable changes to Shipyard will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The public API remains pre-1.0.
 
 ## [Unreleased]
+
+## [0.4.0] - 2026-08-10
 
 ### Added
 
@@ -10,7 +12,7 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ### Changed
 
-- Release workflows now resolve package, SBOM, checksum, and attestation filenames from the built distribution metadata instead of duplicating a hard-coded version across three workflows.
+- Release workflows now resolve package, SBOM, checksum, and attestation filenames from the canonical package version and exact build outputs instead of duplicating a hard-coded version across three workflows.
 - Package metadata now takes its version from `shipyard.__version__`, leaving one release-version source of truth.
 - Upgraded the pinned `actions/upload-artifact` dependency to the Node 24-based v7.0.1 release.
 
@@ -68,7 +70,8 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 - Initial local-first exact-SHA release orchestration MVP.
 
-[Unreleased]: https://github.com/ericklindberg/shipyard/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ericklindberg/shipyard/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ericklindberg/shipyard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ericklindberg/shipyard/releases/tag/v0.3.0
 
 Versions 0.1.0 and 0.2.0 were pre-public development snapshots. The sanitized public history does not contain tags for those versions.
