@@ -20,6 +20,7 @@ from .connections import (
     render_playbook,
     verify_connection,
 )
+from .evidence import EvidenceError, export_evidence_bundle, verify_evidence_bundle
 from .executor import (
     AuthorizationError,
     ProcessInterrupted,
@@ -508,6 +509,25 @@ def _build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--limit", type=int, default=100)
     list_parser.add_argument("--json", action="store_true")
 
+    evidence_parser = subparsers.add_parser(
+        "evidence", help="Export or verify a portable offline evidence bundle"
+    )
+    evidence_subparsers = evidence_parser.add_subparsers(
+        dest="evidence_command", required=True
+    )
+    evidence_export = evidence_subparsers.add_parser(
+        "export", help="Export one run and its approved artifacts"
+    )
+    evidence_export.add_argument("run_id")
+    evidence_export.add_argument("--state-dir", default=str(_default_state_dir()))
+    evidence_export.add_argument("--output", required=True)
+    evidence_export.add_argument("--json", action="store_true")
+    evidence_verify = evidence_subparsers.add_parser(
+        "verify", help="Verify a bundle without ledger or network access"
+    )
+    evidence_verify.add_argument("bundle")
+    evidence_verify.add_argument("--json", action="store_true")
+
     adapters_parser = subparsers.add_parser("adapters", help="List typed adapter actions")
     adapters_parser.add_argument("--json", action="store_true")
 
@@ -637,6 +657,24 @@ def main(argv: list[str] | None = None) -> int:
             payload, code = _doctor(args.repo, args.state_dir, args.playbook)
             _print(payload, as_json=args.json)
             return code
+        if args.command == "evidence":
+            if args.evidence_command == "export":
+                ledger = Ledger(args.state_dir)
+                run = ledger.get_run(args.run_id)
+                destination = export_evidence_bundle(ledger, run.run_id, args.output)
+                _print(
+                    {
+                        "bundle": str(destination),
+                        "run_id": run.run_id,
+                        "source_sha": run.source_sha,
+                        "candidate_digest": run.candidate_digest,
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            payload = verify_evidence_bundle(args.bundle)
+            _print(payload, as_json=args.json)
+            return 0 if payload["valid"] else 1
         if args.command == "serve":
             server = create_server(
                 args.state_dir, args.host, args.port, config_dir=args.config_dir
@@ -689,6 +727,7 @@ def main(argv: list[str] | None = None) -> int:
         AuthorizationError,
         CandidateError,
         ConnectionError,
+        EvidenceError,
         GitError,
         LedgerError,
         PlaybookError,

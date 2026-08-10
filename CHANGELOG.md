@@ -4,6 +4,18 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- Added deterministic portable run-evidence bundles with offline schema, candidate, approval, source, audit-chain, provider receipt/readback, archive-safety, and artifact-byte verification.
+
+### Changed
+
+- Upgraded the pinned `actions/upload-artifact` dependency to the Node 24-based v7.0.1 release.
+
+### Security
+
+- Evidence export refuses changed approved artifacts and existing destinations; verification rejects links, traversal, duplicate/undeclared members, malformed identity bindings, and drifted provider readback.
+
 ## [0.3.0] - 2026-08-10
 
 ### Added

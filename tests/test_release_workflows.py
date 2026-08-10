@@ -39,7 +39,7 @@ def test_shipyard_dogfood_workflow_runs_the_complete_exact_sha_gate():
         "shipyard-0.3.0-runtime.cdx.json",
         "shipyard-0.3.0-build.cdx.json",
         "scripts/write_checksums.py",
-        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     ):
         assert required in workflow
     assert "deploy" not in workflow.casefold()
@@ -84,7 +84,7 @@ def test_ci_covers_linux_and_macos_with_locked_security_gates():
     assert "shipyard-0.3.0-runtime.cdx.json" in workflow
     assert "shipyard-0.3.0-build.cdx.json" in workflow
     assert "shipyard-0.3.0.cdx.json" not in workflow
-    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in workflow
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
     assert "git diff --exit-code" in workflow
 
 
@@ -97,6 +97,7 @@ def test_release_evidence_workflow_attests_without_publishing():
     assert "id-token: write" in workflow
     assert "attestations: write" in workflow
     assert "actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661" in workflow
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
     assert "scripts/write_checksums.py" in workflow
     assert "uv run cyclonedx-py" in workflow
     assert ".runtime-sbom/bin/python" in workflow

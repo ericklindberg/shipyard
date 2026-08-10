@@ -4,6 +4,8 @@ Shipyard is a local-first, POSIX release control plane for exact-source deployme
 
 Shipyard coordinates deployment tools; it does not bypass repository governance, provider protections, mobile-store gates, or runtime verification.
 
+**Project status:** pre-1.0 beta. The local ledger, exact-SHA authorization, Git/GitHub Actions path, and offline evidence verifier are exercised in CI and release dogfood. Other provider adapters remain beta pending operator-run sandbox validation against a disposable live target.
+
 ## Why Shipyard
 
 A deployment is more than a command exiting zero. Shipyard binds authorization to:
@@ -108,6 +110,8 @@ Schema version 2 is the production path. It forbids raw external argv and routes
 - `heroku.build` — source-blob build with version readback;
 - `vercel.deploy` — exact Git SHA deployment and deployment readback.
 
+`git.ref` and `github.workflow` are the release-dogfooded paths. The remaining typed adapters have deterministic fake-provider contracts but require live sandbox evidence before a production-readiness claim.
+
 Use `shipyard connection add`, `check`, and `playbook` for reusable per-user onboarding, or `shipyard init PROVIDER` to generate an unconfigured provider example. Connection profiles and playbooks store environment-variable names, never values. See [Per-user service connections](docs/CONNECTIONS.md).
 
 Legacy schema version 1 remains available for reviewed local commands. Raw external execution is disabled by default and requires `SHIPYARD_ENABLE_LEGACY_EXTERNAL=1`; it is not recommended for production.
@@ -134,6 +138,17 @@ Default release-state directory: `~/.local/state/shipyard`
 - `locks/` — per-run and canonical destination locks.
 
 The ledger migrates historical schemas transactionally using SQLite `user_version`. JSON manifests are rebuilt from SQLite and advance monotonically.
+
+## Portable offline evidence
+
+Export a governed run, its canonical manifest projection, provider receipt/readback evidence, audit chain, and approved artifacts into one deterministic bundle:
+
+```bash
+shipyard evidence export RUN_ID --output shipyard-evidence.tar --json
+shipyard evidence verify shipyard-evidence.tar --json
+```
+
+Verification is offline and does not need the original ledger, checkout, credentials, or provider. It checks the evidence schema, canonical record digest, candidate/approval/source identity, audit chain, operation receipts and semantic readback, archive safety, and every artifact byte against its approved SHA-256 digest. The bundle is self-verifying but not signed; use authenticated transport or external provenance when third parties must establish who supplied it. See [Portable evidence](docs/EVIDENCE.md).
 
 ## Local web view
 
@@ -170,6 +185,7 @@ Read [SECURITY.md](SECURITY.md) for the threat model and reporting process. Impo
 - [Provider sandbox contract validation](docs/PROVIDER_VALIDATION.md)
 - [Exact-SHA release and provenance process](docs/RELEASING.md)
 - [Adapter contract and roadmap](docs/ADAPTERS.md)
+- [Portable offline evidence](docs/EVIDENCE.md)
 - [MVP acceptance contract](docs/MVP.md)
 
 Licensed under the [MIT License](LICENSE).

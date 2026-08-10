@@ -808,7 +808,7 @@ class Ledger:
             evidence=payload["evidence"],
         )
 
-    def write_manifest(self, run: ReleaseRun) -> Path:
+    def manifest_payload(self, run: ReleaseRun) -> dict[str, object]:
         with self._connect() as connection:
             attempt_rows = connection.execute(
                 """
@@ -883,6 +883,10 @@ class Ledger:
             "created_at": run.created_at,
             "updated_at": run.updated_at,
         }
+        return payload
+
+    def write_manifest(self, run: ReleaseRun) -> Path:
+        payload = self.manifest_payload(run)
         destination = self.runs_dir / f"{run.run_id}.json"
         temporary = self.runs_dir / f".{run.run_id}.{uuid.uuid4().hex}.tmp"
         manifest_lock = self.locks_dir / f"manifest-{run.run_id}.lock"

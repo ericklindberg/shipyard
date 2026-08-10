@@ -41,12 +41,12 @@ The harness:
 
 Failures and uncertain outcomes are not retried automatically.
 
-## Validation status for 0.3.0
+## Validation status through 0.3.0
 
-| Provider path | Automated contract | Sandbox evidence on 2026-08-09 | Release claim |
+| Provider path | Automated contract | Retained evidence through 2026-08-10 | Release claim |
 |---|---|---|---|
 | Git/GitHub named remote | Unit, integration, and exact-ref readback | Passed against a disposable local bare Git remote, including one exact-SHA mutation and readback | Implementation verified; live GitHub account contract still operator-dependent |
-| GitHub Actions | Fake HTTPS transport verifies stable repository/workflow identity, exact ref-to-SHA fencing, durable dispatch run ID, and run readback | Read-only identity check passed against the public Shipyard repository and active release-evidence workflow; no mutation performed | Beta; exact-SHA non-mutating dispatch is verified separately during release dogfood |
+| GitHub Actions | Fake HTTPS transport verifies stable repository/workflow identity, exact ref-to-SHA fencing, durable dispatch run ID, and run readback | Exact-SHA non-deploying workflow dispatch and semantic readback succeeded during release dogfood against the public Shipyard repository | Beta and release-dogfooded; downstream deployment semantics remain operator-specific |
 | Buzz-hosted Git | Same `git.ref` contract | Covered by named-remote Git path; no live Buzz-hosted repository target configured | Beta |
 | Buzz workflow | Fake runner verifies `workflows get`; execute/readback contract covered | No sandbox workflow profile or `BUZZ_PRIVATE_KEY` available | Beta; live validation required |
 | Render | Fake HTTPS transport, exact service identity, mutation/readback contract | No sandbox service profile or credential reference available | Beta; live validation required |

@@ -59,6 +59,8 @@ Shipyard protects an operator from accidental, stale, ambiguous, or insufficient
 - Shipyard never serializes its process environment.
 - Provider responses persisted by adapters must contain allowlisted evidence only, not raw response bodies or headers.
 
+Portable evidence bundles are written mode `0600`, reject links/traversal/duplicates, and include only approved artifacts. Their SHA-256 hashes and local audit chain prove self-consistency, not authorship: they are not signatures or an external trust root. Use authenticated transport or separately verified provenance before trusting a third-party bundle, and inspect metadata before sharing one.
+
 ## Safe incident response
 
 For an `uncertain` run:

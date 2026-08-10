@@ -21,7 +21,7 @@ A receipt is never sufficient evidence of success. The executor marks a step suc
 | `heroku.build` | Heroku builds | source-blob version | build status and source version |
 | `vercel.deploy` | Vercel projects | Git ref/SHA | deployment state and Git SHA |
 
-These adapters have deterministic fake-provider contract tests. The GitHub Actions adapter uses the GitHub REST API version `2026-03-10` workflow-dispatch response so a mutation returns a durable workflow-run ID. Activation against a real account remains an operator decision and requires provider credentials plus an authorized sandbox validation.
+These adapters have deterministic fake-provider contract tests. The GitHub Actions adapter uses the GitHub REST API version `2026-03-10` workflow-dispatch response so a mutation returns a durable workflow-run ID. The `git.ref` and `github.workflow` paths are release-dogfooded; every other adapter remains beta until an operator validates it against a disposable live target with retained redacted evidence.
 
 ## Recommended next profiles
 
