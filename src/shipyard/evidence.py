@@ -572,6 +572,15 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
         if step is None:
             errors.append(f"adapter receipt has no matching step: {operation_id}")
             continue
+        receipt_ordinal = receipt.get("ordinal")
+        if receipt_ordinal is not None and (
+            type(receipt_ordinal) is not int
+            or receipt_ordinal != step.get("ordinal")
+        ):
+            errors.append(
+                f"adapter receipt ordinal does not match step: {operation_id}"
+            )
+            receipt_valid = False
         action = step.get("action")
         if receipt.get("action") != action:
             errors.append(

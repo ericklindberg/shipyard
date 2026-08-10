@@ -744,6 +744,7 @@ class Ledger:
     ) -> None:
         timestamp = _now()
         payload: dict[str, object] = {
+            "ordinal": ordinal,
             "provider": receipt.provider,
             "action": receipt.action,
             "operation_id": receipt.operation_id,
@@ -805,7 +806,62 @@ class Ledger:
             ).fetchone()
             if row is None:
                 return False
-            payload = json.loads(row["receipt_json"])
+            receipt_json = str(row["receipt_json"])
+            try:
+                payload = json.loads(receipt_json)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise LedgerError(
+                    "stored adapter receipt is malformed; "
+                    "manual ledger reconciliation is required"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise LedgerError(
+                    "stored adapter receipt is malformed; "
+                    "manual ledger reconciliation is required"
+                )
+            stored_ordinal = payload.get("ordinal")
+            if stored_ordinal is None:
+                stored_receipts = connection.execute(
+                    """
+                    SELECT receipt_json FROM adapter_receipts
+                    WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchall()
+                try:
+                    duplicate_count = sum(
+                        json.loads(str(candidate["receipt_json"])) == payload
+                        for candidate in stored_receipts
+                    )
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise LedgerError(
+                        "stored adapter receipt is malformed; "
+                        "manual ledger reconciliation is required"
+                    ) from exc
+                if duplicate_count != 1:
+                    raise LedgerError(
+                        "legacy adapter receipt audit binding is ambiguous; "
+                        "manual ledger reconciliation is required"
+                    )
+                legacy_payload = json.dumps(
+                    payload, separators=(",", ":"), sort_keys=True
+                )
+                legacy_event = connection.execute(
+                    """
+                    SELECT 1 FROM audit_events
+                    WHERE run_id = ? AND event_type = 'adapter.receipt'
+                      AND payload_json = ?
+                    LIMIT 1
+                    """,
+                    (run_id, legacy_payload),
+                ).fetchone()
+                if legacy_event is not None:
+                    return False
+                payload["ordinal"] = ordinal
+            elif stored_ordinal != ordinal:
+                raise LedgerError(
+                    "adapter receipt ordinal does not match its ledger step"
+                )
             canonical_payload = json.dumps(
                 payload, separators=(",", ":"), sort_keys=True
             )

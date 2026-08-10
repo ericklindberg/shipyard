@@ -30,6 +30,37 @@ command = ["git", "status", "--short"]
     return path
 
 
+def _two_external_playbook(path: Path) -> Path:
+    path.write_text(
+        '''schema_version = 2
+name = "ledger-two-step"
+target = "production"
+provider = "render"
+destination = "owner/service/production"
+
+[[steps]]
+id = "deploy-a"
+name = "Deploy A"
+effect = "external"
+action = "render.deploy"
+[steps.config]
+service_id = "srv-1"
+token_env = "RENDER_API_KEY"
+
+[[steps]]
+id = "deploy-b"
+name = "Deploy B"
+effect = "external"
+action = "render.deploy"
+[steps.config]
+service_id = "srv-1"
+token_env = "RENDER_API_KEY"
+''',
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_v1_database_is_transactionally_migrated(tmp_path):
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
@@ -207,6 +238,72 @@ def test_adapter_receipt_remains_durable_when_its_audit_event_cannot_be_written(
     assert "adapter.receipt" not in {
         event["event_type"] for event in ledger.list_audit_events(run.run_id)
     }
+
+
+def test_receipt_recovery_is_bound_to_step_ordinal_when_payloads_collide(
+    git_repo, tmp_path
+):
+    ledger = Ledger(tmp_path / "state")
+    run = ledger.create_run(
+        snapshot_repository(git_repo),
+        load_playbook(_two_external_playbook(tmp_path / "shipyard.toml")),
+    )
+    receipt = MutationReceipt(
+        provider="render",
+        action="render.deploy",
+        operation_id="provider-reused-id",
+        submitted_sha=run.source_sha,
+        evidence={"service_id": "srv-1"},
+    )
+    ledger.record_adapter_receipt(run.run_id, 0, receipt)
+    _reject_audit_inserts(ledger)
+    with pytest.raises(LedgerError, match="receipt is durable"):
+        ledger.record_adapter_receipt(run.run_id, 1, receipt)
+    with sqlite3.connect(ledger.database_path) as connection:
+        connection.execute("DROP TRIGGER reject_audit_insert")
+
+    assert ledger.ensure_adapter_receipt_audit_event(run.run_id, 1) is True
+    receipt_events = [
+        event["payload"]
+        for event in ledger.list_audit_events(run.run_id)
+        if event["event_type"] == "adapter.receipt"
+    ]
+    assert [payload["ordinal"] for payload in receipt_events] == [0, 1]
+
+
+def test_legacy_duplicate_receipts_fail_closed_on_audit_recovery(git_repo, tmp_path):
+    ledger = Ledger(tmp_path / "state")
+    run = ledger.create_run(
+        snapshot_repository(git_repo),
+        load_playbook(_two_external_playbook(tmp_path / "shipyard.toml")),
+    )
+    receipt = MutationReceipt(
+        provider="render",
+        action="render.deploy",
+        operation_id="legacy-collision",
+        submitted_sha=run.source_sha,
+        evidence={"service_id": "srv-1"},
+    )
+    ledger.record_adapter_receipt(run.run_id, 0, receipt)
+    ledger.record_adapter_receipt(run.run_id, 1, receipt)
+    legacy_payload = json.dumps(
+        {
+            "provider": receipt.provider,
+            "action": receipt.action,
+            "operation_id": receipt.operation_id,
+            "submitted_sha": receipt.submitted_sha,
+            "evidence": receipt.evidence,
+        },
+        sort_keys=True,
+    )
+    with sqlite3.connect(ledger.database_path) as connection:
+        connection.execute(
+            "UPDATE adapter_receipts SET receipt_json = ? WHERE run_id = ?",
+            (legacy_payload, run.run_id),
+        )
+
+    with pytest.raises(LedgerError, match="binding is ambiguous"):
+        ledger.ensure_adapter_receipt_audit_event(run.run_id, 1)
 
 
 def test_adapter_readback_rolls_back_when_its_audit_event_cannot_be_written(

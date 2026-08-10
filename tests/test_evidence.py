@@ -472,6 +472,36 @@ def test_verifier_rejects_receipt_action_mismatch(git_repo, tmp_path):
     ]
 
 
+def test_verifier_rejects_receipt_ordinal_mismatch(git_repo, tmp_path):
+    ledger, run = _completed_provider_run(git_repo, tmp_path)
+    bundle = export_evidence_bundle(ledger, run.run_id, tmp_path / "evidence.tar")
+    mismatched = tmp_path / "mismatched-ordinal.tar"
+
+    def change_receipt_ordinal(members):
+        rewritten = []
+        for name, content in members:
+            if name == "evidence.json":
+                payload = json.loads(content)
+                events = payload["run"]["audit_events"]
+                receipt = next(
+                    event for event in events if event["event_type"] == "adapter.receipt"
+                )
+                receipt["payload"]["ordinal"] = 999
+                _rehash_audit_events(payload["run"]["run_id"], events)
+                payload["record_sha256"] = _canonical_sha256(payload["run"])
+                content = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+            rewritten.append((name, content))
+        return rewritten
+
+    _rewrite_bundle(bundle, mismatched, change_receipt_ordinal)
+    report = verify_evidence_bundle(mismatched)
+
+    assert report["valid"] is False
+    assert report["errors"] == [
+        "adapter receipt ordinal does not match step: git-123456789"
+    ]
+
+
 def test_offline_verifier_detects_tampered_artifact(git_repo, tmp_path):
     ledger, run = _completed_run(git_repo, tmp_path)
     bundle = export_evidence_bundle(ledger, run.run_id, tmp_path / "evidence.tar")
