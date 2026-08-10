@@ -32,6 +32,15 @@ def test_external_command_classifier_remains_a_bounded_orchestrator():
     assert function.end_lineno <= 40
 
 
+def test_playbook_loader_remains_a_bounded_orchestrator():
+    source = inspect.getsource(playbook_module.load_playbook)
+    function = ast.parse(source).body[0]
+
+    assert isinstance(function, ast.FunctionDef)
+    assert function.end_lineno is not None
+    assert function.end_lineno <= 40
+
+
 def test_typed_git_ref_rejects_credential_bearing_or_direct_remote_urls(tmp_path):
     path = tmp_path / "shipyard.toml"
     path.write_text(

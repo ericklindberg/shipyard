@@ -548,14 +548,19 @@ def _require(mapping: dict[str, Any], key: str, expected: type) -> Any:
     return value
 
 
-def load_playbook(path: str | Path) -> Playbook:
+def _read_playbook_document(path: str | Path) -> tuple[Path, bytes, dict[str, Any]]:
     playbook_path = Path(path).expanduser().resolve()
     try:
         raw_bytes = playbook_path.read_bytes()
         data = tomllib.loads(raw_bytes.decode("utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise PlaybookError(f"cannot load playbook: {exc}") from exc
+    return playbook_path, raw_bytes, data
 
+
+def _parse_playbook_header(
+    data: dict[str, Any],
+) -> tuple[Any, str, str, str, str, bool, list[Any]]:
     schema_version = data.get("schema_version")
     if schema_version not in {1, 2}:
         raise PlaybookError("schema_version must be 1 or 2")
@@ -573,11 +578,14 @@ def load_playbook(path: str | Path) -> Playbook:
     raw_steps = data.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps:
         raise PlaybookError("steps must be a non-empty array")
+    return schema_version, name, target, provider, destination, allow_dirty, raw_steps
 
-    artifacts: list[ArtifactSpec] = []
+
+def _parse_artifacts(data: dict[str, Any]) -> tuple[ArtifactSpec, ...]:
     raw_artifacts = data.get("artifacts", [])
     if not isinstance(raw_artifacts, list):
         raise PlaybookError("artifacts must be an array")
+    artifacts: list[ArtifactSpec] = []
     for raw_artifact in raw_artifacts:
         if not isinstance(raw_artifact, dict):
             raise PlaybookError("each artifact must be a table")
@@ -588,127 +596,154 @@ def load_playbook(path: str | Path) -> Playbook:
         if not isinstance(required, bool):
             raise PlaybookError("artifact required must be bool")
         artifacts.append(ArtifactSpec(path=artifact_path, required=required))
+    return tuple(artifacts)
 
-    seen: set[str] = set()
-    steps: list[Step] = []
-    for raw_step in raw_steps:
-        if not isinstance(raw_step, dict):
-            raise PlaybookError("each step must be a table")
-        step_id = _require(raw_step, "id", str)
-        if not _ID.fullmatch(step_id):
-            raise PlaybookError(f"invalid step id: {step_id}")
-        if step_id in seen:
-            raise PlaybookError(f"duplicate step id: {step_id}")
-        seen.add(step_id)
-        step_name = _require(raw_step, "name", str).strip()
-        effect = _require(raw_step, "effect", str)
-        if effect not in _EFFECTS:
-            raise PlaybookError(f"invalid effect for {step_id}: {effect}")
-        action_value = raw_step.get("action")
-        config_value = raw_step.get("config", {})
-        if action_value is not None:
-            if schema_version != 2:
-                raise PlaybookError(f"adapter action for {step_id} requires schema_version 2")
-            if not isinstance(action_value, str) or action_value not in _ADAPTER_ACTIONS:
-                raise PlaybookError(f"unknown adapter action for {step_id}: {action_value}")
-            if effect != "external":
-                raise PlaybookError(f"adapter action {step_id} must be marked external")
-            if "command" in raw_step:
-                raise PlaybookError(f"step {step_id} cannot define both action and command")
-            if not isinstance(config_value, dict):
-                raise PlaybookError(f"config for {step_id} must be a table")
-            for key, value in config_value.items():
-                lowered = str(key).lower()
-                if any(
-                    word in lowered for word in ("token", "secret", "password", "key")
-                ) and not lowered.endswith("_env"):
-                    raise PlaybookError(
-                        f"credential config {key} for {step_id} must name an *_env variable"
-                    )
-                if not isinstance(value, (str, int, bool)):
-                    raise PlaybookError(
-                        f"config value {key} for {step_id} must be string, int, or bool"
-                    )
-                prefix = _ACTION_ENV_PREFIX.get(action_value)
-                if (
-                    lowered.endswith("_env")
-                    and prefix is not None
-                    and (not isinstance(value, str) or not value.startswith(prefix))
-                ):
-                    raise PlaybookError(
-                        f"credential config {key} for {step_id} must use a {prefix} variable"
-                    )
-            if action_value == "git.ref":
-                remote = config_value.get("remote", "origin")
-                if (
-                    not isinstance(remote, str)
-                    or not _NAMED_GIT_REMOTE.fullmatch(remote)
-                    or ".." in remote
-                    or remote.endswith("/")
-                ):
-                    raise PlaybookError(
-                        f"git.ref config for {step_id} must use a named Git remote"
-                    )
-            command: tuple[str, ...] = ()
-        else:
-            command_value = raw_step.get("command")
-            if (
-                not isinstance(command_value, list)
-                or not command_value
-                or not all(isinstance(part, str) and part for part in command_value)
-            ):
-                raise PlaybookError(f"command for {step_id} must be a non-empty string array")
-            command = tuple(command_value)
-            if schema_version == 2 and effect == "external":
-                raise PlaybookError(
-                    f"schema_version 2 external step {step_id} must use a typed adapter action"
-                )
-            if _uses_env_split_string(command):
-                raise PlaybookError(
-                    f"env split-string is not supported in command for {step_id}"
-                )
-            if redact_argv(command) != command:
-                raise PlaybookError(
-                    f"secret values may not appear in command for {step_id}; use a credential store"
-                )
-        timeout = raw_step.get("timeout_seconds", 900)
-        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 7200:
-            raise PlaybookError(f"timeout_seconds for {step_id} must be between 1 and 7200")
-        if command and effect != "external" and _is_external_command(command):
-            raise PlaybookError(f"step {step_id} must be marked external")
-        if (
-            effect == "external"
-            and _contains_git_push(command)
-            and not _has_exact_sha_push_refspec(command)
+
+def _validate_adapter_config(action: str, config: dict[str, Any], step_id: str) -> None:
+    for key, value in config.items():
+        lowered = str(key).lower()
+        if any(word in lowered for word in ("token", "secret", "password", "key")) and not (
+            lowered.endswith("_env")
         ):
             raise PlaybookError(
-                f"external git push step {step_id} must use the exact {{sha}} placeholder "
-                "in one {sha}:refs/heads/... or {sha}:refs/tags/... refspec"
+                f"credential config {key} for {step_id} must name an *_env variable"
             )
-        steps.append(
-            Step(
-                id=step_id,
-                name=step_name,
-                effect=effect,  # type: ignore[arg-type]
-                command=command,
-                timeout_seconds=timeout,
-                action=action_value,
-                config=dict(config_value),
+        if not isinstance(value, (str, int, bool)):
+            raise PlaybookError(
+                f"config value {key} for {step_id} must be string, int, or bool"
             )
+        prefix = _ACTION_ENV_PREFIX.get(action)
+        if (
+            lowered.endswith("_env")
+            and prefix is not None
+            and (not isinstance(value, str) or not value.startswith(prefix))
+        ):
+            raise PlaybookError(
+                f"credential config {key} for {step_id} must use a {prefix} variable"
+            )
+    if action == "git.ref":
+        remote = config.get("remote", "origin")
+        if (
+            not isinstance(remote, str)
+            or not _NAMED_GIT_REMOTE.fullmatch(remote)
+            or ".." in remote
+            or remote.endswith("/")
+        ):
+            raise PlaybookError(f"git.ref config for {step_id} must use a named Git remote")
+
+
+def _parse_adapter_step(
+    raw_step: dict[str, Any], schema_version: Any, effect: str, step_id: str
+) -> tuple[tuple[str, ...], str, dict[str, Any]]:
+    action = raw_step.get("action")
+    if schema_version != 2:
+        raise PlaybookError(f"adapter action for {step_id} requires schema_version 2")
+    if not isinstance(action, str) or action not in _ADAPTER_ACTIONS:
+        raise PlaybookError(f"unknown adapter action for {step_id}: {action}")
+    if effect != "external":
+        raise PlaybookError(f"adapter action {step_id} must be marked external")
+    if "command" in raw_step:
+        raise PlaybookError(f"step {step_id} cannot define both action and command")
+    config = raw_step.get("config", {})
+    if not isinstance(config, dict):
+        raise PlaybookError(f"config for {step_id} must be a table")
+    _validate_adapter_config(action, config, step_id)
+    return (), action, config
+
+
+def _parse_command_step(
+    raw_step: dict[str, Any], schema_version: Any, effect: str, step_id: str
+) -> tuple[tuple[str, ...], None, Any]:
+    command_value = raw_step.get("command")
+    if (
+        not isinstance(command_value, list)
+        or not command_value
+        or not all(isinstance(part, str) and part for part in command_value)
+    ):
+        raise PlaybookError(f"command for {step_id} must be a non-empty string array")
+    command = tuple(command_value)
+    if schema_version == 2 and effect == "external":
+        raise PlaybookError(
+            f"schema_version 2 external step {step_id} must use a typed adapter action"
+        )
+    if _uses_env_split_string(command):
+        raise PlaybookError(f"env split-string is not supported in command for {step_id}")
+    if redact_argv(command) != command:
+        raise PlaybookError(
+            f"secret values may not appear in command for {step_id}; use a credential store"
+        )
+    return command, None, raw_step.get("config", {})
+
+
+def _validate_step_policy(command: tuple[str, ...], effect: str, step_id: str) -> None:
+    if command and effect != "external" and _is_external_command(command):
+        raise PlaybookError(f"step {step_id} must be marked external")
+    if (
+        effect == "external"
+        and _contains_git_push(command)
+        and not _has_exact_sha_push_refspec(command)
+    ):
+        raise PlaybookError(
+            f"external git push step {step_id} must use the exact {{sha}} placeholder "
+            "in one {sha}:refs/heads/... or {sha}:refs/tags/... refspec"
         )
 
+
+def _parse_step(raw_step: Any, schema_version: Any, seen: set[str]) -> Step:
+    if not isinstance(raw_step, dict):
+        raise PlaybookError("each step must be a table")
+    step_id = _require(raw_step, "id", str)
+    if not _ID.fullmatch(step_id):
+        raise PlaybookError(f"invalid step id: {step_id}")
+    if step_id in seen:
+        raise PlaybookError(f"duplicate step id: {step_id}")
+    seen.add(step_id)
+    step_name = _require(raw_step, "name", str).strip()
+    effect = _require(raw_step, "effect", str)
+    if effect not in _EFFECTS:
+        raise PlaybookError(f"invalid effect for {step_id}: {effect}")
+    if raw_step.get("action") is not None:
+        command, action, config = _parse_adapter_step(raw_step, schema_version, effect, step_id)
+    else:
+        command, action, config = _parse_command_step(raw_step, schema_version, effect, step_id)
+    timeout = raw_step.get("timeout_seconds", 900)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 7200:
+        raise PlaybookError(f"timeout_seconds for {step_id} must be between 1 and 7200")
+    _validate_step_policy(command, effect, step_id)
+    return Step(
+        id=step_id,
+        name=step_name,
+        effect=effect,  # type: ignore[arg-type]
+        command=command,
+        timeout_seconds=timeout,
+        action=action,
+        config=dict(config),
+    )
+
+
+def _parse_steps(raw_steps: list[Any], schema_version: Any) -> tuple[Step, ...]:
+    seen: set[str] = set()
+    return tuple(_parse_step(raw_step, schema_version, seen) for raw_step in raw_steps)
+
+
+def load_playbook(path: str | Path) -> Playbook:
+    playbook_path, raw_bytes, data = _read_playbook_document(path)
+    schema, name, target, provider, destination, allow_dirty, raw_steps = (
+        _parse_playbook_header(data)
+    )
+    artifacts = _parse_artifacts(data)
+    steps = _parse_steps(raw_steps, schema)
     if allow_dirty and any(step.effect == "external" for step in steps):
         raise PlaybookError("external steps require a clean source; allow_dirty must be false")
-
     return Playbook(
         path=playbook_path,
         name=name,
         target=target,
         allow_dirty=allow_dirty,
         digest=hashlib.sha256(raw_bytes).hexdigest(),
-        steps=tuple(steps),
+        steps=steps,
         provider=provider,
         destination=destination.strip(),
-        artifacts=tuple(artifacts),
-        schema_version=schema_version,
+        artifacts=artifacts,
+        schema_version=schema,
     )
