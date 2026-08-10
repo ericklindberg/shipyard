@@ -11,6 +11,13 @@ def enable_legacy_external_only_for_v1_regression_tests(monkeypatch):
     monkeypatch.setenv("SHIPYARD_ENABLE_LEGACY_EXTERNAL", "1")
 
 
+@pytest.fixture(autouse=True)
+def isolate_global_target_locks_per_test(monkeypatch, tmp_path: Path):
+    # Production locks must be shared across state directories. Test processes need
+    # distinct roots so concurrent local/CI suites cannot fence each other.
+    monkeypatch.setenv("SHIPYARD_GLOBAL_LOCK_DIR", str(tmp_path / "global-target-locks"))
+
+
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
