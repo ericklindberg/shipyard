@@ -81,10 +81,11 @@ def test_source_distribution_manifest_includes_operator_and_contributor_material
     manifest = manifest_path.read_text(encoding="utf-8")
 
     for required in (
-        "include CHANGELOG.md CONTRIBUTING.md SECURITY.md",
+        "include CHANGELOG.md CONTRIBUTING.md SECURITY.md ROADMAP.md",
         "recursive-include docs *.md",
         "recursive-include examples *.yml",
         "recursive-include scripts *.py",
+        "recursive-include .github/ISSUE_TEMPLATE *.yml",
     ):
         assert required in manifest
 
