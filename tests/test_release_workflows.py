@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from shipyard import __version__
+
 ROOT = Path(__file__).parents[1]
+
+
+def test_readme_install_url_tracks_the_release_version():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    release_url = (
+        "https://github.com/ericklindberg/shipyard/releases/download/"
+        f"v{__version__}/gary_shipyard-{__version__}-py3-none-any.whl"
+    )
+
+    assert release_url in readme
 
 
 def test_github_actions_example_exposes_shipyard_dispatch_contract_without_mutation():
