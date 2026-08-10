@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ast
+import inspect
 from pathlib import Path
 
 import pytest
 
+from shipyard import playbook as playbook_module
 from shipyard.playbook import PlaybookError, load_playbook
 
 
@@ -18,6 +21,15 @@ allow_dirty = {str(allow_dirty).lower()}
 ''',
         encoding="utf-8",
     )
+
+
+def test_external_command_classifier_remains_a_bounded_orchestrator():
+    source = inspect.getsource(playbook_module._is_external_command)
+    function = ast.parse(source).body[0]
+
+    assert isinstance(function, ast.FunctionDef)
+    assert function.end_lineno is not None
+    assert function.end_lineno <= 40
 
 
 def test_typed_git_ref_rejects_credential_bearing_or_direct_remote_urls(tmp_path):

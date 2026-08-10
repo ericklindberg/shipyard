@@ -186,258 +186,341 @@ def _has_exact_sha_push_refspec(command: tuple[str, ...]) -> bool:
     return False
 
 
+def _first_argument(args: tuple[str, ...]) -> str:
+    return args[0] if args else ""
+
+
+def _is_external_env_wrapper(command: tuple[str, ...]) -> bool:
+    index = 1
+    while (
+        index < len(command)
+        and "=" in command[index]
+        and not command[index].startswith("-")
+    ):
+        index += 1
+    while index < len(command) and command[index] in {
+        "-i",
+        "--ignore-environment",
+        "--",
+    }:
+        index += 1
+    if index < len(command) and command[index].startswith("-"):
+        return True
+    return _is_external_command(command[index:])
+
+
+def _is_external_package_runner(command: tuple[str, ...]) -> bool:
+    index = 1
+    while index < len(command) and command[index].startswith("-"):
+        option = command[index]
+        if option in _PACKAGE_RUNNER_OPTIONS_WITH_VALUE:
+            index += 2
+        elif any(
+            option.startswith(f"{name}=")
+            for name in _PACKAGE_RUNNER_OPTIONS_WITH_VALUE
+            if name.startswith("--")
+        ) or option in {"--yes", "-y"}:
+            index += 1
+        else:
+            return True
+    return _is_external_command(command[index:])
+
+
+def _is_external_uv(command: tuple[str, ...], args: tuple[str, ...]) -> bool:
+    first = _first_argument(args)
+    if first == "build":
+        return False
+    if first != "run":
+        return True
+    index = 2
+    while index < len(command) and command[index].startswith("-"):
+        if command[index] in {"--extra", "--group", "--python"}:
+            index += 2
+        else:
+            index += 1
+    return _is_external_command(command[index:])
+
+
+def _is_external_shell(_command: tuple[str, ...], args: tuple[str, ...]) -> bool:
+    return any("c" in argument for argument in args if argument.startswith("-"))
+
+
+def _is_external_git(command: tuple[str, ...], _args: tuple[str, ...]) -> bool:
+    if "-c" in command[1:] or any(
+        option == "--config-env"
+        or option.startswith("--config-env=")
+        or option.startswith("--exec-path=")
+        for option in command[1:]
+    ):
+        return True
+    subcommand = _git_subcommand(command)
+    return subcommand is not None and subcommand not in _SAFE_GIT_SUBCOMMANDS
+
+
+def _is_external_gh(_command: tuple[str, ...], args: tuple[str, ...]) -> bool:
+    first = _first_argument(args)
+    if first == "pr" and len(args) > 1:
+        return any(
+            argument in {"create", "merge", "close", "edit", "review", "reopen"}
+            for argument in args[1:]
+        )
+    if first == "workflow" and len(args) > 1:
+        return any(
+            argument in {"run", "enable", "disable"} for argument in args[1:]
+        )
+    if first == "run" and len(args) > 1:
+        return any(
+            argument in {"cancel", "delete", "rerun"} for argument in args[1:]
+        )
+    if first == "api":
+        joined = " ".join(args)
+        if any(
+            argument in {"-f", "--field", "--raw-field", "--input"}
+            or argument.startswith(
+                ("-f=", "--field=", "--raw-field=", "--input=")
+            )
+            for argument in args
+        ):
+            return True
+        return any(
+            marker in joined
+            for marker in (
+                "--method post",
+                "--method put",
+                "--method patch",
+                "--method delete",
+                "-x post",
+                "-x put",
+                "-x patch",
+                "-x delete",
+            )
+        ) or any(
+            argument.startswith(
+                ("--method=post", "--method=put", "--method=patch", "--method=delete")
+            )
+            for argument in args
+        )
+    if first == "repo":
+        return len(args) < 2 or args[1] not in {"clone", "list", "view"}
+    if first == "auth":
+        return len(args) < 2 or args[1] != "status"
+    return first not in {"search", "status"}
+
+
+def _is_external_eas(_command: tuple[str, ...], args: tuple[str, ...]) -> bool:
+    return _first_argument(args) not in {
+        "branch:list",
+        "branch:view",
+        "build:list",
+        "build:view",
+        "channel:list",
+        "channel:view",
+        "project:info",
+        "update:list",
+        "update:view",
+        "whoami",
+    }
+
+
+def _is_external_systemctl(_command: tuple[str, ...], args: tuple[str, ...]) -> bool:
+    return _first_argument(args) not in {
+        "cat",
+        "help",
+        "is-active",
+        "is-enabled",
+        "list-dependencies",
+        "list-sockets",
+        "list-timers",
+        "list-unit-files",
+        "list-units",
+        "show",
+        "status",
+    }
+
+
+def _is_external_service(_command: tuple[str, ...], args: tuple[str, ...]) -> bool:
+    return not (
+        args == ("--status-all",) or (len(args) == 2 and args[1] == "status")
+    )
+
+
+def _is_external_curl(_command: tuple[str, ...], args: tuple[str, ...]) -> bool:
+    for index, argument in enumerate(args):
+        method: str | None = None
+        if argument in {"-x", "--request"} and index + 1 < len(args):
+            method = args[index + 1]
+        elif argument.startswith("-x") and len(argument) > 2:
+            method = argument[2:]
+        elif argument.startswith("--request="):
+            method = argument.partition("=")[2]
+        if method is not None and method not in {"get", "head", "options"}:
+            return True
+    write_flags = {
+        "-d",
+        "--data",
+        "--data-raw",
+        "--data-binary",
+        "--data-urlencode",
+        "--json",
+        "-f",
+        "--form",
+        "--form-string",
+        "-t",
+        "--upload-file",
+    }
+    write_prefixes = (
+        "--data=",
+        "--data-raw=",
+        "--data-binary=",
+        "--data-urlencode=",
+        "--json=",
+        "--form=",
+        "--form-string=",
+        "--upload-file=",
+    )
+    if any(
+        argument in write_flags or argument.startswith(write_prefixes)
+        for argument in args
+    ):
+        return True
+    return any(
+        argument.startswith(
+            ("-d", "-f", "-t", "-xdelete", "-xpatch", "-xpost", "-xput")
+        )
+        or argument.startswith(
+            (
+                "--request=delete",
+                "--request=patch",
+                "--request=post",
+                "--request=put",
+            )
+        )
+        for argument in args
+    )
+
+
+def _is_external_docker(_command: tuple[str, ...], args: tuple[str, ...]) -> bool:
+    first = _first_argument(args)
+    if first == "build" and any(
+        argument == "--push"
+        or argument.startswith("--output=type=registry")
+        or argument == "type=registry"
+        for argument in args[1:]
+    ):
+        return True
+    return first not in {
+        "build",
+        "events",
+        "history",
+        "images",
+        "info",
+        "inspect",
+        "logs",
+        "ps",
+        "stats",
+        "top",
+        "version",
+    }
+
+
+def _is_external_npm(_command: tuple[str, ...], args: tuple[str, ...]) -> bool:
+    return _first_argument(args) in {
+        "access",
+        "adduser",
+        "deprecate",
+        "dist-tag",
+        "login",
+        "logout",
+        "org",
+        "owner",
+        "publish",
+        "star",
+        "team",
+        "token",
+        "unpublish",
+        "unstar",
+    }
+
+
+def _is_external_cargo(_command: tuple[str, ...], args: tuple[str, ...]) -> bool:
+    return _first_argument(args) in {"login", "owner", "publish", "yank"}
+
+
+def _is_external_interpreter(
+    _command: tuple[str, ...], args: tuple[str, ...]
+) -> bool:
+    if any(argument in {"-c", "-e"} for argument in args):
+        return True
+    if _first_argument(args) == "-m":
+        return len(args) < 2 or args[1] not in _LOCAL_PYTHON_MODULES
+    return False
+
+
+def _is_external_twine(_command: tuple[str, ...], args: tuple[str, ...]) -> bool:
+    return _first_argument(args) == "upload"
+
+
+def _is_external_terraform(
+    _command: tuple[str, ...], args: tuple[str, ...]
+) -> bool:
+    return _first_argument(args) in {"apply", "destroy", "import"}
+
+
+def _always_external(_command: tuple[str, ...], _args: tuple[str, ...]) -> bool:
+    return True
+
+
+_EXTERNAL_COMMAND_CLASSIFIERS = {
+    "bash": _is_external_shell,
+    "cargo": _is_external_cargo,
+    "curl": _is_external_curl,
+    "doas": _always_external,
+    "docker": _is_external_docker,
+    "eas": _is_external_eas,
+    "fish": _is_external_shell,
+    "gh": _is_external_gh,
+    "git": _is_external_git,
+    "node": _is_external_interpreter,
+    "npm": _is_external_npm,
+    "perl": _is_external_interpreter,
+    "python": _is_external_interpreter,
+    "python3": _is_external_interpreter,
+    "rsync": _always_external,
+    "ruby": _is_external_interpreter,
+    "scp": _always_external,
+    "service": _is_external_service,
+    "sh": _is_external_shell,
+    "ssh": _always_external,
+    "sudo": _always_external,
+    "systemctl": _is_external_systemctl,
+    "terraform": _is_external_terraform,
+    "twine": _is_external_twine,
+    "uv": _is_external_uv,
+    "zsh": _is_external_shell,
+}
+
+
 def _is_external_command(command: tuple[str, ...]) -> bool:
     if not command:
         return False
     executable = Path(command[0]).name.lower()
-    args = [part.lower() for part in command[1:]]
-    first = args[0] if args else ""
+    args = tuple(part.lower() for part in command[1:])
+    first = _first_argument(args)
     if executable == "env":
-        index = 1
-        while (
-            index < len(command)
-            and "=" in command[index]
-            and not command[index].startswith("-")
-        ):
-            index += 1
-        while index < len(command) and command[index] in {
-            "-i",
-            "--ignore-environment",
-            "--",
-        }:
-            index += 1
-        if index < len(command) and command[index].startswith("-"):
-            return True
-        return _is_external_command(command[index:])
+        return _is_external_env_wrapper(command)
     if executable in _OPAQUE_EXECUTION_WRAPPERS:
         return True
     if executable in {"npx", "bunx"} and len(command) > 1:
-        index = 1
-        while index < len(command) and command[index].startswith("-"):
-            option = command[index]
-            if option in _PACKAGE_RUNNER_OPTIONS_WITH_VALUE:
-                index += 2
-            elif any(
-                option.startswith(f"{name}=")
-                for name in _PACKAGE_RUNNER_OPTIONS_WITH_VALUE
-                if name.startswith("--")
-            ) or option in {"--yes", "-y"}:
-                index += 1
-            else:
-                return True
-        return _is_external_command(command[index:])
-    if executable in {"pnpm", "yarn"} and first in {"dlx", "exec"} and len(command) > 2:
+        return _is_external_package_runner(command)
+    if (
+        executable in {"pnpm", "yarn"}
+        and first in {"dlx", "exec"}
+        and len(command) > 2
+    ):
         return _is_external_command(command[2:])
-    shell_command = executable in {"bash", "sh", "zsh", "fish"} and any(
-        "c" in arg for arg in args if arg.startswith("-")
-    )
-    if shell_command:
-        return True
-    if executable in {"sudo", "doas"}:
-        return True
-    if executable in {"ssh", "scp", "rsync"}:
-        return True
-    if executable == "git":
-        if "-c" in command[1:] or any(
-            option == "--config-env"
-            or option.startswith("--config-env=")
-            or option.startswith("--exec-path=")
-            for option in command[1:]
-        ):
-            return True
-        subcommand = _git_subcommand(command)
-        return subcommand is not None and subcommand not in _SAFE_GIT_SUBCOMMANDS
-    if executable == "gh":
-        if first == "pr" and len(args) > 1:
-            return any(
-                argument in {"create", "merge", "close", "edit", "review", "reopen"}
-                for argument in args[1:]
-            )
-        if first == "workflow" and len(args) > 1:
-            return any(
-                argument in {"run", "enable", "disable"} for argument in args[1:]
-            )
-        if first == "run" and len(args) > 1:
-            return any(
-                argument in {"cancel", "delete", "rerun"} for argument in args[1:]
-            )
-        if first == "api":
-            joined = " ".join(args)
-            if any(
-                arg in {"-f", "--field", "--raw-field", "--input"}
-                or arg.startswith(("-f=", "--field=", "--raw-field=", "--input="))
-                for arg in args
-            ):
-                return True
-            return any(
-                marker in joined
-                for marker in (
-                    "--method post",
-                    "--method put",
-                    "--method patch",
-                    "--method delete",
-                    "-x post",
-                    "-x put",
-                    "-x patch",
-                    "-x delete",
-                )
-            ) or any(
-                argument.startswith(
-                    ("--method=post", "--method=put", "--method=patch", "--method=delete")
-                )
-                for argument in args
-            )
-        if first == "repo":
-            return len(args) < 2 or args[1] not in {"clone", "list", "view"}
-        if first == "auth":
-            return len(args) < 2 or args[1] != "status"
-        return first not in {"search", "status"}
-    if executable == "eas":
-        return first not in {
-            "branch:list",
-            "branch:view",
-            "build:list",
-            "build:view",
-            "channel:list",
-            "channel:view",
-            "project:info",
-            "update:list",
-            "update:view",
-            "whoami",
-        }
-    if executable == "systemctl":
-        return first not in {
-            "cat",
-            "help",
-            "is-active",
-            "is-enabled",
-            "list-dependencies",
-            "list-sockets",
-            "list-timers",
-            "list-unit-files",
-            "list-units",
-            "show",
-            "status",
-        }
-    if executable == "service":
-        return not (args == ["--status-all"] or (len(args) == 2 and args[1] == "status"))
-    if executable == "curl":
-        for index, argument in enumerate(args):
-            method: str | None = None
-            if argument in {"-x", "--request"} and index + 1 < len(args):
-                method = args[index + 1]
-            elif argument.startswith("-x") and len(argument) > 2:
-                method = argument[2:]
-            elif argument.startswith("--request="):
-                method = argument.partition("=")[2]
-            if method is not None and method not in {"get", "head", "options"}:
-                return True
-        write_flags = {
-            "-d",
-            "--data",
-            "--data-raw",
-            "--data-binary",
-            "--data-urlencode",
-            "--json",
-            "-f",
-            "--form",
-            "--form-string",
-            "-t",
-            "--upload-file",
-        }
-        write_prefixes = (
-            "--data=",
-            "--data-raw=",
-            "--data-binary=",
-            "--data-urlencode=",
-            "--json=",
-            "--form=",
-            "--form-string=",
-            "--upload-file=",
-        )
-        if any(
-            arg in write_flags or arg.startswith(write_prefixes)
-            for arg in args
-        ):
-            return True
-        return any(
-            arg.startswith(("-d", "-f", "-t", "-xdelete", "-xpatch", "-xpost", "-xput"))
-            or arg.startswith(
-                (
-                    "--request=delete",
-                    "--request=patch",
-                    "--request=post",
-                    "--request=put",
-                )
-            )
-            for arg in args
-        )
-    if executable in {"kubectl", "helm"} and first not in {"get", "describe", "diff", "list"}:
-        return True
-    if executable == "docker":
-        if first == "build" and any(
-            argument == "--push"
-            or argument.startswith("--output=type=registry")
-            or argument == "type=registry"
-            for argument in args[1:]
-        ):
-            return True
-        return first not in {
-            "build",
-            "events",
-            "history",
-            "images",
-            "info",
-            "inspect",
-            "logs",
-            "ps",
-            "stats",
-            "top",
-            "version",
-        }
-    if executable == "npm":
-        return first in {
-            "access",
-            "adduser",
-            "deprecate",
-            "dist-tag",
-            "login",
-            "logout",
-            "org",
-            "owner",
-            "publish",
-            "star",
-            "team",
-            "token",
-            "unpublish",
-            "unstar",
-        }
-    if executable == "cargo":
-        return first in {"login", "owner", "publish", "yank"}
-    if executable in {"node", "perl", "python", "python3", "ruby"}:
-        if any(argument in {"-c", "-e"} for argument in args):
-            return True
-        if first == "-m":
-            return len(args) < 2 or args[1] not in _LOCAL_PYTHON_MODULES
-        return False
-    if executable in {"bash", "sh", "zsh", "fish"}:
-        return shell_command
-    if executable == "uv":
-        if first == "build":
-            return False
-        if first != "run":
-            return True
-        index = 2
-        while index < len(command) and command[index].startswith("-"):
-            if command[index] in {"--extra", "--group", "--python"}:
-                index += 2
-            else:
-                index += 1
-        return _is_external_command(command[index:])
-    if executable == "twine":
-        return first == "upload"
-    if executable == "terraform":
-        return first in {"apply", "destroy", "import"}
+    classifier = _EXTERNAL_COMMAND_CLASSIFIERS.get(executable)
+    if classifier is not None:
+        return classifier(command, args)
     return executable not in _LOCAL_EXECUTABLES
 
 
