@@ -7,7 +7,7 @@ from shipyard.identity import package_version
 
 
 def test_distribution_metadata_matches_source_version() -> None:
-    assert importlib.metadata.version("gary-shipyard") == __version__
+    assert importlib.metadata.version("shipyard-release") == __version__
 
 
 def test_package_version_uses_the_published_distribution_name(monkeypatch) -> None:
@@ -20,7 +20,7 @@ def test_package_version_uses_the_published_distribution_name(monkeypatch) -> No
     monkeypatch.setattr(importlib.metadata, "version", fake_version)
 
     assert package_version() == "9.9.9"
-    assert requested == ["gary-shipyard"]
+    assert requested == ["shipyard-release"]
 
 
 def test_package_version_falls_back_to_source_version(monkeypatch) -> None:

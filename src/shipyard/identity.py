@@ -11,7 +11,7 @@ from pathlib import Path
 from . import __version__
 from .runtime import resolve_executable, sanitized_environment
 
-_DISTRIBUTION = "gary-shipyard"
+_DISTRIBUTION = "shipyard-release"
 
 
 def package_version() -> str:

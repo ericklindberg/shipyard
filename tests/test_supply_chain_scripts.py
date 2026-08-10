@@ -72,8 +72,8 @@ def test_checksum_writer_is_deterministic_and_excludes_its_output(tmp_path):
 
 
 def test_release_artifact_resolver_uses_canonical_version_and_exact_build_outputs(tmp_path):
-    wheel = f"gary_shipyard-{__version__}-py3-none-any.whl"
-    sdist = f"gary_shipyard-{__version__}.tar.gz"
+    wheel = f"shipyard_release-{__version__}-py3-none-any.whl"
+    sdist = f"shipyard_release-{__version__}.tar.gz"
     (tmp_path / wheel).write_bytes(b"wheel")
     (tmp_path / sdist).write_bytes(b"sdist")
 
@@ -94,11 +94,11 @@ def test_release_artifact_resolver_uses_canonical_version_and_exact_build_output
 
 
 def test_release_artifact_resolver_rejects_ambiguous_build_outputs(tmp_path):
-    (tmp_path / f"gary_shipyard-{__version__}-py3-none-any.whl").write_bytes(b"wheel")
-    (tmp_path / f"gary_shipyard-{__version__}-1-py3-none-any.whl").write_bytes(
+    (tmp_path / f"shipyard_release-{__version__}-py3-none-any.whl").write_bytes(b"wheel")
+    (tmp_path / f"shipyard_release-{__version__}-1-py3-none-any.whl").write_bytes(
         b"duplicate"
     )
-    (tmp_path / f"gary_shipyard-{__version__}.tar.gz").write_bytes(b"sdist")
+    (tmp_path / f"shipyard_release-{__version__}.tar.gz").write_bytes(b"sdist")
 
     result = subprocess.run(
         [sys.executable, str(RELEASE_ARTIFACTS), "--directory", str(tmp_path)],

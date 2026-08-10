@@ -3,7 +3,7 @@ requires = ["setuptools==84.0.0", "wheel==0.47.0", "packaging==26.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gary-shipyard"
+name = "shipyard-release"
 dynamic = ["version"]
 description = "Exact-SHA release orchestration with resumable evidence and guarded side effects"
 readme = "README.md"

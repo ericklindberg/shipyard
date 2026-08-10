@@ -55,11 +55,11 @@ def resolve(directory: Path) -> dict[str, str]:
     if _SAFE_VALUE.fullmatch(version) is None:
         raise ArtifactResolutionError("distribution version is unsafe for artifact names")
     wheel_version = re.sub(r"[^A-Za-z0-9.]+", "_", version)
-    expected_wheel = f"gary_shipyard-{wheel_version}-py3-none-any.whl"
-    expected_sdist = f"gary_shipyard-{version}.tar.gz"
+    expected_wheel = f"shipyard_release-{wheel_version}-py3-none-any.whl"
+    expected_sdist = f"shipyard_release-{version}.tar.gz"
 
-    wheel = _one(sorted(root.glob("gary_shipyard-*.whl")), "wheel")
-    sdist = _one(sorted(root.glob("gary_shipyard-*.tar.gz")), "source archive")
+    wheel = _one(sorted(root.glob("shipyard_release-*.whl")), "wheel")
+    sdist = _one(sorted(root.glob("shipyard_release-*.tar.gz")), "source archive")
     if wheel.name != expected_wheel:
         raise ArtifactResolutionError(
             f"wheel does not match distribution version: expected {expected_wheel}"
