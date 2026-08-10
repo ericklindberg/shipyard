@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -231,6 +233,28 @@ def _run_cli(args: list[str], *, cwd: Path):
         text=True,
         capture_output=True,
     )
+
+
+def test_record_verifier_remains_a_bounded_orchestrator():
+    source = inspect.getsource(evidence_module._verify_record)
+    function = ast.parse(source).body[0]
+
+    assert isinstance(function, ast.FunctionDef)
+    assert function.end_lineno is not None
+    assert function.end_lineno <= 50
+
+
+def test_record_verification_stages_return_errors_without_shared_mutation():
+    stages = (
+        evidence_module._verify_record_identity,
+        evidence_module._collect_audit_evidence,
+        evidence_module._collect_steps,
+        evidence_module._verify_readback_histories,
+        evidence_module._verify_receipts,
+        evidence_module._verify_provider_evidence,
+    )
+
+    assert all("errors" not in inspect.signature(stage).parameters for stage in stages)
 
 
 def test_exported_bundle_is_deterministic_and_verifies_offline(git_repo, tmp_path):

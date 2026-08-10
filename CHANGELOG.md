@@ -4,6 +4,10 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ## [Unreleased]
 
+### Changed
+
+- Refactored portable evidence verification into bounded, side-effect-free identity, audit, step, readback, receipt, and orchestration stages while preserving the `shipyard.evidence/v1` report contract and fail-closed validation order.
+
 ## [0.4.0] - 2026-08-10
 
 ### Added

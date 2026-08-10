@@ -9,6 +9,7 @@ import re
 import stat
 import tarfile
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, TypedDict
 
@@ -29,7 +30,12 @@ _RUN_STATUSES = {
 }
 _STEP_STATUSES = {"pending", "running", "succeeded", "failed", "blocked", "uncertain"}
 _ADAPTER_STATUSES = {"succeeded", "failed", "pending", "unknown"}
-
+_EXPECTED_PROVIDERS = {
+    "buzz.workflow": "buzz",
+    "github.workflow": "github-actions",
+    "git.ref": "git",
+    "render.deploy": "render",
+}
 
 
 class EvidenceError(ValueError):
@@ -400,7 +406,27 @@ def _verify_audit_chain(run_id: str, events: object) -> tuple[bool, list[str]]:
     return True, []
 
 
-def _verify_record(record: dict[str, object], record_digest: object) -> dict[str, object]:
+@dataclass(frozen=True)
+class _RecordIdentity:
+    record_sha256_valid: bool
+    run_id: object
+    run_id_for_chain: str
+    status: object
+    source_sha: object
+    candidate_digest: object
+    approval: object
+
+
+@dataclass(frozen=True)
+class _AuditEvidence:
+    audit_valid: bool
+    receipts: dict[str, dict[str, object]]
+    readbacks: dict[str, list[dict[str, object]]]
+
+
+def _verify_record_identity(
+    record: dict[str, object], record_digest: object
+) -> tuple[_RecordIdentity, list[str]]:
     errors: list[str] = []
     actual_record_digest = _sha256_bytes(record)
     record_sha256_valid = (
@@ -460,12 +486,27 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
     if approval is None:
         errors.append("evidence lacks candidate approval")
 
-    audit_valid, audit_errors = _verify_audit_chain(
-        run_id_for_chain, record.get("audit_events")
+    return (
+        _RecordIdentity(
+            record_sha256_valid=record_sha256_valid,
+            run_id=run_id,
+            run_id_for_chain=run_id_for_chain,
+            status=status,
+            source_sha=source_sha,
+            candidate_digest=candidate_digest,
+            approval=approval,
+        ),
+        errors,
     )
-    errors.extend(audit_errors)
+
+
+def _collect_audit_evidence(
+    record: dict[str, object], identity: _RecordIdentity
+) -> tuple[_AuditEvidence, list[str]]:
+    errors: list[str] = []
     events = record.get("audit_events")
-    receipts_verified = 0
+    audit_valid, audit_errors = _verify_audit_chain(identity.run_id_for_chain, events)
+    errors.extend(audit_errors)
     readbacks: dict[str, list[dict[str, object]]] = {}
     receipts: dict[str, dict[str, object]] = {}
     run_created_events = 0
@@ -478,17 +519,17 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
             payload = event["payload"]
             if event.get("event_type") == "run.created":
                 run_created_events += 1
-                if payload.get("source_sha") != source_sha:
+                if payload.get("source_sha") != identity.source_sha:
                     errors.append("run-created event does not match source SHA")
             elif event.get("event_type") == "candidate.prepared":
                 candidate_prepared_events += 1
-                if payload.get("candidate_digest") != candidate_digest:
+                if payload.get("candidate_digest") != identity.candidate_digest:
                     errors.append(
                         "prepared-candidate event does not match candidate digest"
                     )
             elif event.get("event_type") == "candidate.approved":
                 candidate_approved_events += 1
-                if payload.get("candidate_digest") != candidate_digest:
+                if payload.get("candidate_digest") != identity.candidate_digest:
                     errors.append("approval event does not match candidate digest")
             elif event.get("event_type") == "adapter.receipt":
                 operation_id = payload.get("operation_id")
@@ -513,42 +554,56 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
             errors.append("candidate prepared audit event is missing")
         elif candidate_prepared_events > 1:
             errors.append("candidate prepared audit event is duplicated")
-        if approval is not None and candidate_approved_events != 1:
+        if identity.approval is not None and candidate_approved_events != 1:
             errors.append("candidate approval audit event is missing or duplicated")
+    return (
+        _AuditEvidence(
+            audit_valid=audit_valid,
+            receipts=receipts,
+            readbacks=readbacks,
+        ),
+        errors,
+    )
 
+
+def _collect_steps(
+    record: dict[str, object], status: object
+) -> tuple[dict[str, dict[str, object]], list[str]]:
+    errors: list[str] = []
     steps = record.get("steps")
     steps_by_operation: dict[str, dict[str, object]] = {}
     if not isinstance(steps, list):
         errors.append("steps must be a list")
-    else:
-        if status == "succeeded" and any(
-            not isinstance(step, dict) or step.get("status") != "succeeded"
-            for step in steps
-        ):
-            errors.append("successful run contains a non-successful step")
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
-            if step.get("status") not in _STEP_STATUSES:
-                errors.append("step status is invalid")
-            operation_id = step.get("operation_id")
-            if not isinstance(operation_id, str):
-                if status == "succeeded" and step.get("effect") == "external":
-                    errors.append(
-                        f"successful external step lacks operation id: {step.get('id')}"
-                    )
-                continue
-            if operation_id in steps_by_operation:
-                errors.append(f"duplicate step operation id: {operation_id}")
-            else:
-                steps_by_operation[operation_id] = step
+        return steps_by_operation, errors
+    if status == "succeeded" and any(
+        not isinstance(step, dict) or step.get("status") != "succeeded"
+        for step in steps
+    ):
+        errors.append("successful run contains a non-successful step")
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if step.get("status") not in _STEP_STATUSES:
+            errors.append("step status is invalid")
+        operation_id = step.get("operation_id")
+        if not isinstance(operation_id, str):
+            if status == "succeeded" and step.get("effect") == "external":
+                errors.append(
+                    f"successful external step lacks operation id: {step.get('id')}"
+                )
+            continue
+        if operation_id in steps_by_operation:
+            errors.append(f"duplicate step operation id: {operation_id}")
+        else:
+            steps_by_operation[operation_id] = step
+    return steps_by_operation, errors
 
-    expected_providers = {
-        "buzz.workflow": "buzz",
-        "github.workflow": "github-actions",
-        "git.ref": "git",
-        "render.deploy": "render",
-    }
+
+def _verify_readback_histories(
+    readbacks: dict[str, list[dict[str, object]]],
+    source_sha: object,
+) -> list[str]:
+    errors: list[str] = []
     for operation_id, history in readbacks.items():
         terminal_seen = False
         for readback in history:
@@ -563,6 +618,19 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
                 errors.append(f"provider readback SHA mismatch: {operation_id}")
             if readback_status in {"succeeded", "failed"}:
                 terminal_seen = True
+    return errors
+
+
+def _verify_receipts(
+    *,
+    status: object,
+    source_sha: object,
+    receipts: dict[str, dict[str, object]],
+    readbacks: dict[str, list[dict[str, object]]],
+    steps_by_operation: dict[str, dict[str, object]],
+) -> tuple[int, list[str]]:
+    errors: list[str] = []
+    receipts_verified = 0
     for operation_id, receipt in receipts.items():
         receipt_valid = True
         if receipt.get("submitted_sha") != source_sha:
@@ -583,12 +651,10 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
             receipt_valid = False
         action = step.get("action")
         if receipt.get("action") != action:
-            errors.append(
-                f"adapter receipt action does not match step: {operation_id}"
-            )
+            errors.append(f"adapter receipt action does not match step: {operation_id}")
             receipt_valid = False
         else:
-            expected_provider = expected_providers.get(str(action))
+            expected_provider = _EXPECTED_PROVIDERS.get(str(action))
             if expected_provider is not None and receipt.get("provider") != expected_provider:
                 errors.append(
                     f"adapter receipt provider does not match action: {operation_id}"
@@ -616,14 +682,43 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
                 receipt_valid = False
         if receipt_valid:
             receipts_verified += 1
+    return receipts_verified, errors
 
+
+def _verify_provider_evidence(
+    record: dict[str, object],
+    identity: _RecordIdentity,
+    audit: _AuditEvidence,
+) -> tuple[int, list[str]]:
+    errors: list[str] = []
+    steps_by_operation, step_errors = _collect_steps(record, identity.status)
+    errors.extend(step_errors)
+    errors.extend(_verify_readback_histories(audit.readbacks, identity.source_sha))
+    receipts_verified, receipt_errors = _verify_receipts(
+        status=identity.status,
+        source_sha=identity.source_sha,
+        receipts=audit.receipts,
+        readbacks=audit.readbacks,
+        steps_by_operation=steps_by_operation,
+    )
+    errors.extend(receipt_errors)
     for operation_id in steps_by_operation:
-        if operation_id not in receipts:
+        if operation_id not in audit.receipts:
             errors.append(f"step operation is missing its audit receipt: {operation_id}")
-    for operation_id in readbacks:
-        if operation_id not in receipts:
+    for operation_id in audit.readbacks:
+        if operation_id not in audit.receipts:
             errors.append(f"adapter readback has no matching receipt: {operation_id}")
+    return receipts_verified, errors
 
+
+def _verify_record(record: dict[str, object], record_digest: object) -> dict[str, object]:
+    identity, errors = _verify_record_identity(record, record_digest)
+    audit, audit_errors = _collect_audit_evidence(record, identity)
+    errors.extend(audit_errors)
+    receipts_verified, provider_errors = _verify_provider_evidence(
+        record, identity, audit
+    )
+    errors.extend(provider_errors)
     try:
         artifacts = _candidate_artifacts(record)
     except EvidenceError as exc:
@@ -632,18 +727,22 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
     return {
         "schema_version": _SCHEMA_VERSION,
         "valid": not errors,
-        "run_id": run_id if isinstance(run_id, str) else None,
-        "status": status if isinstance(status, str) else None,
-        "source_sha": source_sha if isinstance(source_sha, str) else None,
-        "candidate_digest": (
-            candidate_digest if isinstance(candidate_digest, str) else None
+        "run_id": identity.run_id if isinstance(identity.run_id, str) else None,
+        "status": identity.status if isinstance(identity.status, str) else None,
+        "source_sha": (
+            identity.source_sha if isinstance(identity.source_sha, str) else None
         ),
-        "record_sha256_valid": record_sha256_valid,
-        "audit_chain_valid": audit_valid,
+        "candidate_digest": (
+            identity.candidate_digest
+            if isinstance(identity.candidate_digest, str)
+            else None
+        ),
+        "record_sha256_valid": identity.record_sha256_valid,
+        "audit_chain_valid": audit.audit_valid,
         "artifacts_declared": len(artifacts),
         "artifacts_verified": 0,
         "receipts_verified": receipts_verified,
-        "approval_present": approval is not None,
+        "approval_present": identity.approval is not None,
         "errors": errors,
         "_artifacts": artifacts,
     }
