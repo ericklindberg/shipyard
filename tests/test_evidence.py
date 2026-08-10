@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 import inspect
 import io
@@ -266,17 +267,52 @@ def test_record_verifier_remains_a_bounded_orchestrator():
     assert function.end_lineno <= 50
 
 
-def test_record_verification_stages_return_errors_without_shared_mutation():
-    stages = (
-        evidence_module._verify_record_identity,
-        evidence_module._collect_audit_evidence,
-        evidence_module._collect_steps,
-        evidence_module._verify_readback_histories,
-        evidence_module._verify_receipts,
-        evidence_module._verify_provider_evidence,
-    )
+def test_record_verification_stages_are_behaviorally_isolated(git_repo, tmp_path):
+    ledger, run = _completed_provider_run(git_repo, tmp_path)
+    bundle = export_evidence_bundle(ledger, run.run_id, tmp_path / "isolation.tar")
+    with tarfile.open(bundle, "r:") as archive:
+        evidence_file = archive.extractfile("evidence.json")
+        assert evidence_file is not None
+        envelope = json.load(evidence_file)
 
-    assert all("errors" not in inspect.signature(stage).parameters for stage in stages)
+    record = envelope["run"]
+    record_snapshot = copy.deepcopy(record)
+    identity, identity_errors = evidence_module._verify_record_identity(
+        record, envelope["record_sha256"]
+    )
+    audit, audit_errors = evidence_module._collect_audit_evidence(record, identity)
+    steps_by_operation, step_errors = evidence_module._collect_steps(
+        record, identity.status
+    )
+    readback_errors = evidence_module._verify_readback_histories(
+        audit.readbacks, identity.source_sha
+    )
+    receipts_verified, receipt_errors = evidence_module._verify_receipts(
+        status=identity.status,
+        source_sha=identity.source_sha,
+        receipts=audit.receipts,
+        readbacks=audit.readbacks,
+        steps_by_operation=steps_by_operation,
+    )
+    provider_receipts_verified, provider_errors = (
+        evidence_module._verify_provider_evidence(record, identity, audit)
+    )
+    error_lists = [
+        identity_errors,
+        audit_errors,
+        step_errors,
+        readback_errors,
+        receipt_errors,
+        provider_errors,
+    ]
+
+    assert record == record_snapshot
+    assert receipts_verified == provider_receipts_verified == 1
+    assert all(errors == [] for errors in error_lists)
+    assert len({id(errors) for errors in error_lists}) == len(error_lists)
+
+    identity_errors.append("sentinel")
+    assert all("sentinel" not in errors for errors in error_lists[1:])
 
 
 def test_exported_bundle_is_deterministic_and_verifies_offline(git_repo, tmp_path):
