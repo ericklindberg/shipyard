@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gary-shipyard"
+version = "0.3.0"
+description = "Exact-SHA release orchestration with resumable evidence and guarded side effects"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Erick Lindberg" }]
+dependencies = []
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: System :: Software Distribution",
+]
+keywords = ["deployment", "release", "devops", "provenance", "automation"]
+
+[project.urls]
+Homepage = "https://github.com/ericklindberg/shipyard"
+Repository = "https://github.com/ericklindberg/shipyard"
+Issues = "https://github.com/ericklindberg/shipyard/issues"
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2",
+  "bandit>=1.8",
+  "pytest>=8.3",
+  "ruff>=0.9",
+  "ty>=0.0.69",
+  "pip-audit==2.10.1",
+  "cyclonedx-bom==7.3.1",
+]
+
+[project.scripts]
+shipyard = "shipyard.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/shipyard/web.py" = ["E501"]

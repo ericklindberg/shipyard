@@ -1,0 +1,32 @@
+schema_version = 1
+name = "shipyard-local"
+target = "local-package"
+allow_dirty = false
+
+[[steps]]
+id = "tests"
+name = "Run complete test suite"
+effect = "verify"
+command = ["uv", "run", "--extra", "dev", "pytest", "-q"]
+timeout_seconds = 300
+
+[[steps]]
+id = "lint"
+name = "Run Ruff"
+effect = "verify"
+command = ["uv", "run", "--extra", "dev", "ruff", "check", "src", "tests"]
+timeout_seconds = 120
+
+[[steps]]
+id = "typecheck"
+name = "Run ty type checker"
+effect = "verify"
+command = ["uv", "run", "--extra", "dev", "ty", "check", "src"]
+timeout_seconds = 120
+
+[[steps]]
+id = "build"
+name = "Build wheel and source distribution"
+effect = "build"
+command = ["uv", "build"]
+timeout_seconds = 300

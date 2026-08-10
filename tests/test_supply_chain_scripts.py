@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).parents[1]
+SCANNER = ROOT / "scripts/scan_tracked_secrets.py"
+CHECKSUMS = ROOT / "scripts/write_checksums.py"
+
+
+def _git(path: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=path, check=True, capture_output=True, text=True)
+
+
+def test_secret_scanner_covers_tracked_and_untracked_without_printing_values(tmp_path):
+    _git(tmp_path, "init", "-q")
+    (tmp_path / "safe.txt").write_text("ordinary text\n", encoding="utf-8")
+    _git(tmp_path, "add", "safe.txt")
+
+    clean = subprocess.run(
+        [sys.executable, str(SCANNER), "--root", str(tmp_path)],
+        text=True,
+        capture_output=True,
+    )
+    assert clean.returncode == 0, clean.stderr
+    assert "scanned 1 candidate files" in clean.stdout
+
+    marker = "ghp_" + "A" * 36
+    (tmp_path / "untracked.txt").write_text(f"token={marker}\n", encoding="utf-8")
+    flagged = subprocess.run(
+        [sys.executable, str(SCANNER), "--root", str(tmp_path)],
+        text=True,
+        capture_output=True,
+    )
+    assert flagged.returncode == 1
+    assert "untracked.txt" in flagged.stderr
+    assert "github-token" in flagged.stderr
+    assert marker not in flagged.stdout + flagged.stderr
+
+
+def test_checksum_writer_is_deterministic_and_excludes_its_output(tmp_path):
+    (tmp_path / "b.whl").write_bytes(b"wheel")
+    (tmp_path / "a.tar.gz").write_bytes(b"sdist")
+    (tmp_path / "unrelated.txt").write_text("not a release artifact", encoding="utf-8")
+    output = tmp_path / "SHA256SUMS"
+    command = [
+        sys.executable,
+        str(CHECKSUMS),
+        "--directory",
+        str(tmp_path),
+        "--output",
+        str(output),
+        "--file",
+        "a.tar.gz",
+        "--file",
+        "b.whl",
+    ]
+
+    first = subprocess.run(command, text=True, capture_output=True)
+    assert first.returncode == 0, first.stderr
+    first_bytes = output.read_bytes()
+
+    second = subprocess.run(command, text=True, capture_output=True)
+    assert second.returncode == 0, second.stderr
+    assert output.read_bytes() == first_bytes
+    lines = first_bytes.decode().splitlines()
+    assert [line.split("  ", 1)[1] for line in lines] == ["a.tar.gz", "b.whl"]

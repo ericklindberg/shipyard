@@ -1,0 +1,65 @@
+name: Release evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full 40-character candidate commit SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  attest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.candidate_sha }}
+      - name: Verify exact candidate
+        env:
+          EXPECTED_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - run: uv sync --extra dev --locked
+      - run: python scripts/scan_tracked_secrets.py --root .
+      - name: Audit locked dependency closure
+        run: |
+          requirements="$(mktemp)"
+          trap 'rm -f "$requirements"' EXIT
+          uv export --extra dev --no-emit-project --locked --output-file "$requirements"
+          uv run pip-audit --requirement "$requirements" --require-hashes --disable-pip --strict --progress-spinner off
+      - run: uv run pytest -q
+      - run: uv run ruff check src tests scripts
+      - run: uv run ty check src scripts
+      - run: uv run bandit -q -r src scripts -ll -s B404,B603,B607
+      - run: uv build
+      - name: Generate reproducible CycloneDX SBOM
+        run: uv run cyclonedx-py environment .venv --pyproject pyproject.toml --mc-type application --sv 1.6 --output-reproducible --output-format JSON --output-file dist/shipyard-0.3.0.cdx.json
+      - run: python scripts/write_checksums.py --directory dist --output dist/SHA256SUMS --file gary_shipyard-0.3.0-py3-none-any.whl --file gary_shipyard-0.3.0.tar.gz --file shipyard-0.3.0.cdx.json
+      - run: git diff --check
+      - run: git diff --exit-code
+      - name: Attest exact candidate artifacts
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: |
+            dist/gary_shipyard-0.3.0-py3-none-any.whl
+            dist/gary_shipyard-0.3.0.tar.gz
+            dist/shipyard-0.3.0.cdx.json
+            dist/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: shipyard-attested-${{ inputs.candidate_sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,32 @@
+schema_version = 1
+name = "example-github-main"
+target = "github-main"
+allow_dirty = false
+
+[[steps]]
+id = "tests"
+name = "Run repository tests"
+effect = "verify"
+command = ["python3", "-m", "pytest", "-q"]
+timeout_seconds = 900
+
+[[steps]]
+id = "diff-check"
+name = "Check whitespace and patch integrity"
+effect = "verify"
+command = ["git", "diff", "--check"]
+timeout_seconds = 60
+
+[[steps]]
+id = "push-main"
+name = "Push exact source to main"
+effect = "external"
+command = ["git", "push", "origin", "{sha}:refs/heads/main"]
+timeout_seconds = 120
+
+[[steps]]
+id = "remote-readback"
+name = "Read back remote main"
+effect = "verify"
+command = ["git", "ls-remote", "origin", "refs/heads/main"]
+timeout_seconds = 60
