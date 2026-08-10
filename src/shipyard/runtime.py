@@ -64,6 +64,7 @@ def resolve_executable(executable: str, cwd: Path) -> Path:
     else:
         candidates = tuple(directory / executable for directory in trusted_path_directories())
 
+    unsafe_candidate: Path | None = None
     for candidate in candidates:
         try:
             resolved = candidate.resolve(strict=True)
@@ -73,8 +74,13 @@ def resolve_executable(executable: str, cwd: Path) -> Path:
         if not resolved.is_file() or not os.access(resolved, os.X_OK):
             continue
         if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise RuntimeIdentityError(f"executable is group/world writable: {resolved}")
+            unsafe_candidate = unsafe_candidate or resolved
+            continue
         return resolved
+    if unsafe_candidate is not None:
+        raise RuntimeIdentityError(
+            f"executable is group/world writable: {unsafe_candidate}"
+        )
     raise FileNotFoundError(f"trusted executable not found: {executable}")
 
 
