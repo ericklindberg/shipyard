@@ -858,7 +858,7 @@ class Ledger:
                 if legacy_event is not None:
                     return False
                 payload["ordinal"] = ordinal
-            elif stored_ordinal != ordinal:
+            elif type(stored_ordinal) is not int or stored_ordinal != ordinal:
                 raise LedgerError(
                     "adapter receipt ordinal does not match its ledger step"
                 )

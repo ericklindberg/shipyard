@@ -306,6 +306,41 @@ def test_legacy_duplicate_receipts_fail_closed_on_audit_recovery(git_repo, tmp_p
         ledger.ensure_adapter_receipt_audit_event(run.run_id, 1)
 
 
+@pytest.mark.parametrize("malformed_ordinal", [True, 1.0])
+def test_receipt_recovery_rejects_non_integer_stored_ordinal(
+    git_repo, tmp_path, malformed_ordinal
+):
+    ledger = Ledger(tmp_path / "state")
+    run = ledger.create_run(
+        snapshot_repository(git_repo),
+        load_playbook(_two_external_playbook(tmp_path / "shipyard.toml")),
+    )
+    receipt = MutationReceipt(
+        provider="render",
+        action="render.deploy",
+        operation_id="malformed-ordinal",
+        submitted_sha=run.source_sha,
+        evidence={"service_id": "srv-1"},
+    )
+    ledger.record_adapter_receipt(run.run_id, 1, receipt)
+    with sqlite3.connect(ledger.database_path) as connection:
+        stored = connection.execute(
+            "SELECT receipt_json FROM adapter_receipts "
+            "WHERE run_id = ? AND ordinal = 1",
+            (run.run_id,),
+        ).fetchone()
+        payload = json.loads(stored[0])
+        payload["ordinal"] = malformed_ordinal
+        connection.execute(
+            "UPDATE adapter_receipts SET receipt_json = ? "
+            "WHERE run_id = ? AND ordinal = 1",
+            (json.dumps(payload, sort_keys=True), run.run_id),
+        )
+
+    with pytest.raises(LedgerError, match="ordinal does not match"):
+        ledger.ensure_adapter_receipt_audit_event(run.run_id, 1)
+
+
 def test_adapter_readback_rolls_back_when_its_audit_event_cannot_be_written(
     git_repo, tmp_path
 ):
