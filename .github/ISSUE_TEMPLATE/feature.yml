@@ -1,0 +1,37 @@
+name: Feature proposal
+description: Propose a bounded improvement to Shipyard
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Explain the release-control problem and the evidence Shipyard should produce. Report security defects through GitHub private vulnerability reporting, not a public feature request.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Release problem
+      description: What operator or adopter problem exists today?
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Proposed contract
+      description: Describe inputs, explicit authorization, side effects, authoritative readback, and evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Safety and local-first boundaries
+      description: Explain credentials, network consent, uncertainty, retries, and offline behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Explain why this belongs in Shipyard rather than CI or a provider-native tool.
+    validations:
+      required: true

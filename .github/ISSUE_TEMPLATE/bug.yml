@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible Shipyard defect
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Shipyard. Do not include tokens, credentials, signed URLs, private repository data, or customer information. Report suspected security issues through GitHub private vulnerability reporting instead of this form.
+  - type: input
+    id: version
+    attributes:
+      label: Shipyard version or exact commit
+      placeholder: shipyard 0.4.0 or a 40-character SHA
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include the smallest redacted playbook and commands needed to reproduce the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: mutation
+    attributes:
+      label: Did any provider mutation occur?
+      options:
+        - No
+        - Yes
+        - Unknown or uncertain
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, tokens, signed URLs, private keys, and private customer data.
+          required: true

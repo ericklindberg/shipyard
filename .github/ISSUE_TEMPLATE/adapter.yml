@@ -1,0 +1,56 @@
+name: Adapter proposal
+description: Propose a typed provider adapter and its authoritative readback
+labels:
+  - adapter
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        New adapters must be exact-source or digest-bound, default-deny, one-shot, and recoverable through authoritative readback. Do not paste provider credentials. Report adapter security defects through GitHub private vulnerability reporting.
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and operation
+      placeholder: appstoreconnect.testflight-group
+    validations:
+      required: true
+  - type: textarea
+    id: identity
+    attributes:
+      label: Canonical destination and operation identity
+      description: List immutable provider IDs and how mutable names are rejected or revalidated.
+    validations:
+      required: true
+  - type: textarea
+    id: execute
+    attributes:
+      label: One-shot mutation
+      description: Describe the exact provider request and durable receipt returned.
+    validations:
+      required: true
+  - type: textarea
+    id: readback
+    attributes:
+      label: Authoritative readback
+      description: Explain succeeded, failed, pending, and unknown states and source/digest comparison.
+    validations:
+      required: true
+  - type: textarea
+    id: sandbox
+    attributes:
+      label: Disposable validation plan
+      description: Describe a safe live sandbox and cleanup/readback evidence without automatic retry.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Contract acknowledgement
+      options:
+        - label: Check and readback are read-only.
+          required: true
+        - label: Unknown or interrupted mutation outcomes will not be retried automatically.
+          required: true
+        - label: Credentials are referenced by environment-variable name, never stored in configuration.
+          required: true
