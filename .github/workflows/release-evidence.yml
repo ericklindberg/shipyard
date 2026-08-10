@@ -44,25 +44,27 @@ jobs:
       - run: uv run ty check src scripts
       - run: uv run bandit -q -r src scripts -ll -s B404,B603,B607
       - run: uv build
+      - name: Resolve exact release artifact names
+        run: python scripts/resolve_release_artifacts.py --directory dist >> "$GITHUB_ENV"
       - name: Generate reproducible runtime CycloneDX SBOM
         run: |
           uv venv .runtime-sbom
-          uv pip install --python .runtime-sbom/bin/python --no-deps dist/gary_shipyard-0.3.0-py3-none-any.whl
-          uv run cyclonedx-py environment .runtime-sbom/bin/python --pyproject pyproject.toml --mc-type application --sv 1.6 --output-reproducible --output-format JSON --output-file dist/shipyard-0.3.0-runtime.cdx.json
+          uv pip install --python .runtime-sbom/bin/python --no-deps "dist/$SHIPYARD_WHEEL"
+          uv run cyclonedx-py environment .runtime-sbom/bin/python --pyproject pyproject.toml --mc-type application --sv 1.6 --output-reproducible --output-format JSON --output-file "dist/$SHIPYARD_RUNTIME_SBOM"
           rm -rf .runtime-sbom
       - name: Generate reproducible build-environment CycloneDX SBOM
-        run: uv run cyclonedx-py environment .venv --pyproject pyproject.toml --mc-type application --sv 1.6 --output-reproducible --output-format JSON --output-file dist/shipyard-0.3.0-build.cdx.json
-      - run: python scripts/write_checksums.py --directory dist --output dist/SHA256SUMS --file gary_shipyard-0.3.0-py3-none-any.whl --file gary_shipyard-0.3.0.tar.gz --file shipyard-0.3.0-runtime.cdx.json --file shipyard-0.3.0-build.cdx.json
+        run: uv run cyclonedx-py environment .venv --pyproject pyproject.toml --mc-type application --sv 1.6 --output-reproducible --output-format JSON --output-file "dist/$SHIPYARD_BUILD_SBOM"
+      - run: python scripts/write_checksums.py --directory dist --output dist/SHA256SUMS --file "$SHIPYARD_WHEEL" --file "$SHIPYARD_SDIST" --file "$SHIPYARD_RUNTIME_SBOM" --file "$SHIPYARD_BUILD_SBOM"
       - run: git diff --check
       - run: git diff --exit-code
       - name: Attest exact candidate artifacts
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: |
-            dist/gary_shipyard-0.3.0-py3-none-any.whl
-            dist/gary_shipyard-0.3.0.tar.gz
-            dist/shipyard-0.3.0-runtime.cdx.json
-            dist/shipyard-0.3.0-build.cdx.json
+            dist/${{ env.SHIPYARD_WHEEL }}
+            dist/${{ env.SHIPYARD_SDIST }}
+            dist/${{ env.SHIPYARD_RUNTIME_SBOM }}
+            dist/${{ env.SHIPYARD_BUILD_SBOM }}
             dist/SHA256SUMS
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -21,8 +21,8 @@ Shipyard releases are exact-SHA evidence exercises. CI never deploys providers o
 6. Create a detached, clean worktree at that SHA and repeat all gates there.
 7. Build the wheel and source archive only from that detached worktree.
 8. Install the exact wheel in a fresh virtual environment with `pip --no-index` and run the onboarding smoke.
-9. Generate `dist/shipyard-0.3.0-runtime.cdx.json`, `dist/shipyard-0.3.0-build.cdx.json`, and `dist/SHA256SUMS` with the locked tools and repository scripts.
-10. Verify the checksum file names exactly the expected wheel, source archive, runtime SBOM, and build-environment SBOM.
+9. Run `python scripts/resolve_release_artifacts.py --directory dist` after the build. It derives the exact wheel, source archive, runtime-SBOM, and build-SBOM names from Shipyard's canonical source version and fails if build outputs are missing, ambiguous, or version-mismatched.
+10. Generate the two SBOMs and `dist/SHA256SUMS` using only the resolver-provided names; verify the checksum file names exactly the expected wheel, source archive, runtime SBOM, and build-environment SBOM.
 11. Export a representative completed run with `shipyard evidence export` and verify it from a directory with no ledger access using `shipyard evidence verify`.
 
 ## Buzz-first promotion

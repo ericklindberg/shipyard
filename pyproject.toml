@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gary-shipyard"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Exact-SHA release orchestration with resumable evidence and guarded side effects"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -44,6 +44,9 @@ shipyard = "shipyard.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = { attr = "shipyard.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

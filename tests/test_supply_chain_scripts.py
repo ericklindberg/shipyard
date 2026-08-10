@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 SCANNER = ROOT / "scripts/scan_tracked_secrets.py"
 CHECKSUMS = ROOT / "scripts/write_checksums.py"
+RELEASE_ARTIFACTS = ROOT / "scripts/resolve_release_artifacts.py"
 
 
 def _git(path: Path, *args: str) -> None:
@@ -66,3 +67,38 @@ def test_checksum_writer_is_deterministic_and_excludes_its_output(tmp_path):
     assert output.read_bytes() == first_bytes
     lines = first_bytes.decode().splitlines()
     assert [line.split("  ", 1)[1] for line in lines] == ["a.tar.gz", "b.whl"]
+
+
+def test_release_artifact_resolver_uses_canonical_version_and_exact_build_outputs(tmp_path):
+    (tmp_path / "gary_shipyard-0.3.0-py3-none-any.whl").write_bytes(b"wheel")
+    (tmp_path / "gary_shipyard-0.3.0.tar.gz").write_bytes(b"sdist")
+
+    result = subprocess.run(
+        [sys.executable, str(RELEASE_ARTIFACTS), "--directory", str(tmp_path)],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "SHIPYARD_VERSION=0.3.0",
+        "SHIPYARD_WHEEL=gary_shipyard-0.3.0-py3-none-any.whl",
+        "SHIPYARD_SDIST=gary_shipyard-0.3.0.tar.gz",
+        "SHIPYARD_RUNTIME_SBOM=shipyard-0.3.0-runtime.cdx.json",
+        "SHIPYARD_BUILD_SBOM=shipyard-0.3.0-build.cdx.json",
+    ]
+
+
+def test_release_artifact_resolver_rejects_ambiguous_build_outputs(tmp_path):
+    (tmp_path / "gary_shipyard-0.3.0-py3-none-any.whl").write_bytes(b"wheel")
+    (tmp_path / "gary_shipyard-0.3.0-1-py3-none-any.whl").write_bytes(b"duplicate")
+    (tmp_path / "gary_shipyard-0.3.0.tar.gz").write_bytes(b"sdist")
+
+    result = subprocess.run(
+        [sys.executable, str(RELEASE_ARTIFACTS), "--directory", str(tmp_path)],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "expected exactly one wheel" in result.stderr

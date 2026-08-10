@@ -36,12 +36,16 @@ def test_shipyard_dogfood_workflow_runs_the_complete_exact_sha_gate():
         "uv run pip-audit",
         "scripts/scan_tracked_secrets.py",
         "uv build",
-        "shipyard-0.3.0-runtime.cdx.json",
-        "shipyard-0.3.0-build.cdx.json",
+        "scripts/resolve_release_artifacts.py",
+        "SHIPYARD_WHEEL",
+        "SHIPYARD_SDIST",
+        "SHIPYARD_RUNTIME_SBOM",
+        "SHIPYARD_BUILD_SBOM",
         "scripts/write_checksums.py",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     ):
         assert required in workflow
+    assert "0.3.0" not in workflow
     assert "deploy" not in workflow.casefold()
     assert "publish" not in workflow.casefold()
 
@@ -53,6 +57,10 @@ def test_build_isolation_dependencies_are_exactly_pinned():
     assert '"wheel==0.47.0"' in pyproject
     assert '"packaging==26.3"' in pyproject
     assert '"setuptools>=75"' not in pyproject
+    assert 'dynamic = ["version"]' in pyproject
+    assert '[tool.setuptools.dynamic]' in pyproject
+    assert 'version = { attr = "shipyard.__version__" }' in pyproject
+    assert '\nversion = "0.3.0"' not in pyproject
 
 
 def test_source_distribution_manifest_includes_operator_and_contributor_material():
@@ -81,9 +89,10 @@ def test_ci_covers_linux_and_macos_with_locked_security_gates():
     assert "scripts/scan_tracked_secrets.py" in workflow
     assert "uv run cyclonedx-py" in workflow
     assert ".runtime-sbom/bin/python" in workflow
-    assert "shipyard-0.3.0-runtime.cdx.json" in workflow
-    assert "shipyard-0.3.0-build.cdx.json" in workflow
-    assert "shipyard-0.3.0.cdx.json" not in workflow
+    assert "scripts/resolve_release_artifacts.py" in workflow
+    assert "SHIPYARD_RUNTIME_SBOM" in workflow
+    assert "SHIPYARD_BUILD_SBOM" in workflow
+    assert "0.3.0" not in workflow
     assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
     assert "git diff --exit-code" in workflow
 
@@ -101,9 +110,10 @@ def test_release_evidence_workflow_attests_without_publishing():
     assert "scripts/write_checksums.py" in workflow
     assert "uv run cyclonedx-py" in workflow
     assert ".runtime-sbom/bin/python" in workflow
-    assert "shipyard-0.3.0-runtime.cdx.json" in workflow
-    assert "shipyard-0.3.0-build.cdx.json" in workflow
-    assert "shipyard-0.3.0.cdx.json" not in workflow
+    assert "scripts/resolve_release_artifacts.py" in workflow
+    assert "SHIPYARD_RUNTIME_SBOM" in workflow
+    assert "SHIPYARD_BUILD_SBOM" in workflow
+    assert "0.3.0" not in workflow
     assert "twine upload" not in workflow
     assert "uv publish" not in workflow
     assert "gh release create" not in workflow

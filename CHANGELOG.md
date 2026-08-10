@@ -10,6 +10,8 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ### Changed
 
+- Release workflows now resolve package, SBOM, checksum, and attestation filenames from the built distribution metadata instead of duplicating a hard-coded version across three workflows.
+- Package metadata now takes its version from `shipyard.__version__`, leaving one release-version source of truth.
 - Upgraded the pinned `actions/upload-artifact` dependency to the Node 24-based v7.0.1 release.
 
 ### Security
