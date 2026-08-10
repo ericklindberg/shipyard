@@ -30,6 +30,7 @@ _RUN_STATUSES = {
 _STEP_STATUSES = {"pending", "running", "succeeded", "failed", "blocked", "uncertain"}
 
 
+
 class EvidenceError(ValueError):
     pass
 
@@ -464,7 +465,7 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
     errors.extend(audit_errors)
     events = record.get("audit_events")
     receipts_verified = 0
-    readbacks: dict[str, dict[str, object]] = {}
+    readbacks: dict[str, list[dict[str, object]]] = {}
     receipts: dict[str, dict[str, object]] = {}
     run_created_events = 0
     candidate_prepared_events = 0
@@ -502,12 +503,8 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
                 operation_id = payload.get("operation_id")
                 if not isinstance(operation_id, str) or not operation_id:
                     errors.append("adapter readback operation id is invalid")
-                elif operation_id in readbacks:
-                    errors.append(
-                        f"duplicate adapter readback operation id: {operation_id}"
-                    )
                 else:
-                    readbacks[operation_id] = payload
+                    readbacks.setdefault(operation_id, []).append(payload)
     if audit_valid:
         if run_created_events != 1:
             errors.append("run-created audit event is missing or duplicated")
@@ -551,6 +548,14 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
         "git.ref": "git",
         "render.deploy": "render",
     }
+    for operation_id, history in readbacks.items():
+        terminal_seen = False
+        for readback in history:
+            if terminal_seen:
+                errors.append(f"adapter readback follows terminal state: {operation_id}")
+                break
+            if readback.get("status") in {"succeeded", "failed"}:
+                terminal_seen = True
     for operation_id, receipt in receipts.items():
         receipt_valid = True
         if receipt.get("submitted_sha") != source_sha:
@@ -573,7 +578,8 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
                     f"adapter receipt provider does not match action: {operation_id}"
                 )
                 receipt_valid = False
-        readback = readbacks.get(operation_id)
+        readback_history = readbacks.get(operation_id, [])
+        readback = readback_history[-1] if readback_history else None
         if status == "succeeded":
             if readback is None or readback.get("status") != "succeeded":
                 errors.append(f"successful run lacks successful readback: {operation_id}")

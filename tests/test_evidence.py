@@ -87,6 +87,8 @@ def _completed_provider_run(
     *,
     observed_sha: str | None = None,
     approve: bool = True,
+    pending_before_terminal: bool = False,
+    terminal_before_terminal: bool = False,
 ):
     artifact = git_repo / "dist" / "release.bin"
     artifact.parent.mkdir()
@@ -151,6 +153,28 @@ ref = "refs/heads/release"
             evidence={"ref": "refs/heads/release", "remote": "origin"},
         ),
     )
+    if pending_before_terminal:
+        ledger.record_adapter_readback(
+            run.run_id,
+            1,
+            ProviderReadback(
+                status="pending",
+                operation_id=operation_id,
+                observed_sha=run.source_sha,
+                evidence={"provider_status": "queued"},
+            ),
+        )
+    if terminal_before_terminal:
+        ledger.record_adapter_readback(
+            run.run_id,
+            1,
+            ProviderReadback(
+                status="succeeded",
+                operation_id=operation_id,
+                observed_sha=run.source_sha,
+                evidence={"provider_status": "completed"},
+            ),
+        )
     ledger.record_adapter_readback(
         run.run_id,
         1,
@@ -245,6 +269,36 @@ def test_bundle_verifies_provider_receipt_and_exact_sha_readback(git_repo, tmp_p
 
     assert report["valid"] is True
     assert report["receipts_verified"] == 1
+
+
+def test_bundle_accepts_pending_readback_before_terminal_success(git_repo, tmp_path):
+    ledger, run = _completed_provider_run(
+        git_repo,
+        tmp_path,
+        pending_before_terminal=True,
+    )
+
+    bundle = export_evidence_bundle(ledger, run.run_id, tmp_path / "receipt-history.tar")
+    report = verify_evidence_bundle(bundle)
+
+    assert report["valid"] is True
+    assert report["receipts_verified"] == 1
+    assert report["errors"] == []
+
+
+def test_export_rejects_readback_after_terminal_state(git_repo, tmp_path):
+    ledger, run = _completed_provider_run(
+        git_repo,
+        tmp_path,
+        terminal_before_terminal=True,
+    )
+
+    try:
+        export_evidence_bundle(ledger, run.run_id, tmp_path / "invalid-history.tar")
+    except ValueError as exc:
+        assert "adapter readback follows terminal state" in str(exc)
+    else:
+        raise AssertionError("terminal readback transition was exported")
 
 
 def test_export_fails_closed_on_successful_readback_sha_drift(git_repo, tmp_path):
