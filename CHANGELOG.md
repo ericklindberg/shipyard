@@ -4,7 +4,7 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-08-09
+## [0.3.0] - 2026-08-10
 
 ### Added
 
