@@ -9,6 +9,7 @@ import sys
 import tarfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import shipyard.evidence as evidence_module
 from shipyard.adapters.base import MutationReceipt, ProviderReadback
@@ -89,6 +90,8 @@ def _completed_provider_run(
     approve: bool = True,
     pending_before_terminal: bool = False,
     terminal_before_terminal: bool = False,
+    pending_observed_sha: str | None = None,
+    pending_status: Any = "pending",
 ):
     artifact = git_repo / "dist" / "release.bin"
     artifact.parent.mkdir()
@@ -158,9 +161,9 @@ ref = "refs/heads/release"
             run.run_id,
             1,
             ProviderReadback(
-                status="pending",
+                status=pending_status,
                 operation_id=operation_id,
-                observed_sha=run.source_sha,
+                observed_sha=pending_observed_sha or run.source_sha,
                 evidence={"provider_status": "queued"},
             ),
         )
@@ -299,6 +302,38 @@ def test_export_rejects_readback_after_terminal_state(git_repo, tmp_path):
         assert "adapter readback follows terminal state" in str(exc)
     else:
         raise AssertionError("terminal readback transition was exported")
+
+
+def test_export_rejects_source_drift_in_pending_readback_history(git_repo, tmp_path):
+    ledger, run = _completed_provider_run(
+        git_repo,
+        tmp_path,
+        pending_before_terminal=True,
+        pending_observed_sha="0" * 40,
+    )
+
+    try:
+        export_evidence_bundle(ledger, run.run_id, tmp_path / "drifted-history.tar")
+    except ValueError as exc:
+        assert "provider readback SHA mismatch" in str(exc)
+    else:
+        raise AssertionError("drifted pending readback was exported")
+
+
+def test_export_rejects_invalid_provider_status_in_readback_history(git_repo, tmp_path):
+    ledger, run = _completed_provider_run(
+        git_repo,
+        tmp_path,
+        pending_before_terminal=True,
+        pending_status="bogus",
+    )
+
+    try:
+        export_evidence_bundle(ledger, run.run_id, tmp_path / "invalid-status.tar")
+    except ValueError as exc:
+        assert "adapter readback status is invalid" in str(exc)
+    else:
+        raise AssertionError("invalid provider status was exported")
 
 
 def test_export_fails_closed_on_successful_readback_sha_drift(git_repo, tmp_path):

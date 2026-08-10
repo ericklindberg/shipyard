@@ -28,6 +28,7 @@ _RUN_STATUSES = {
     "uncertain",
 }
 _STEP_STATUSES = {"pending", "running", "succeeded", "failed", "blocked", "uncertain"}
+_ADAPTER_STATUSES = {"succeeded", "failed", "pending", "unknown"}
 
 
 
@@ -551,10 +552,16 @@ def _verify_record(record: dict[str, object], record_digest: object) -> dict[str
     for operation_id, history in readbacks.items():
         terminal_seen = False
         for readback in history:
+            readback_status = readback.get("status")
+            if readback_status not in _ADAPTER_STATUSES:
+                errors.append(f"adapter readback status is invalid: {operation_id}")
             if terminal_seen:
                 errors.append(f"adapter readback follows terminal state: {operation_id}")
                 break
-            if readback.get("status") in {"succeeded", "failed"}:
+            observed_sha = readback.get("observed_sha")
+            if observed_sha is not None and observed_sha != source_sha:
+                errors.append(f"provider readback SHA mismatch: {operation_id}")
+            if readback_status in {"succeeded", "failed"}:
                 terminal_seen = True
     for operation_id, receipt in receipts.items():
         receipt_valid = True
