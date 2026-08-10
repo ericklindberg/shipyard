@@ -179,6 +179,34 @@ command = {command}
         load_playbook(path)
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        '["kubectl", "get", "pods"]',
+        '["kubectl", "describe", "pod/example"]',
+        '["kubectl", "diff", "-f", "deployment.yml"]',
+        '["helm", "get", "manifest", "example"]',
+        '["helm", "list"]',
+    ],
+)
+def test_cluster_clis_remain_default_deny_without_an_explicit_policy(
+    tmp_path, command
+):
+    path = tmp_path / "shipyard.toml"
+    write_playbook(
+        path,
+        f'''[[steps]]
+id = "cluster"
+name = "Cluster read"
+effect = "verify"
+command = {command}
+''',
+    )
+
+    with pytest.raises(PlaybookError, match="must be marked external"):
+        load_playbook(path)
+
+
 def test_env_split_string_is_rejected_at_every_effect_boundary(tmp_path):
     for effect in ("verify", "build", "external"):
         for option in (
