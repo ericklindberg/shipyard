@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from shipyard.adapters.base import MutationReceipt, ProviderReadback
 from shipyard.gitops import snapshot_repository
 from shipyard.ledger import Ledger, LedgerError, RunBusyError
 from shipyard.playbook import load_playbook
@@ -93,6 +94,141 @@ def test_newer_database_schema_is_rejected_without_modification(tmp_path):
         version = connection.execute("PRAGMA user_version").fetchone()[0]
     assert value == "preserve-me"
     assert version == 99
+
+
+def _reject_audit_inserts(ledger: Ledger) -> None:
+    with sqlite3.connect(ledger.database_path) as connection:
+        connection.execute(
+            '''CREATE TRIGGER reject_audit_insert
+            BEFORE INSERT ON audit_events
+            BEGIN
+                SELECT RAISE(ABORT, 'injected audit failure');
+            END'''
+        )
+
+
+def test_run_creation_rolls_back_when_its_audit_event_cannot_be_written(
+    git_repo, tmp_path
+):
+    ledger = Ledger(tmp_path / "state")
+    playbook = load_playbook(_local_playbook(tmp_path / "shipyard.toml"))
+    _reject_audit_inserts(ledger)
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected audit failure"):
+        ledger.create_run(snapshot_repository(git_repo), playbook)
+
+    with sqlite3.connect(ledger.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM steps").fetchone()[0] == 0
+
+
+def test_candidate_update_rolls_back_when_its_audit_event_cannot_be_written(
+    git_repo, tmp_path
+):
+    ledger = Ledger(tmp_path / "state")
+    run = ledger.create_run(
+        snapshot_repository(git_repo),
+        load_playbook(_local_playbook(tmp_path / "shipyard.toml")),
+    )
+    original_revision = run.manifest_revision
+    _reject_audit_inserts(ledger)
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected audit failure"):
+        ledger.store_candidate(run.run_id, "a" * 64, {"source": {"sha": run.source_sha}})
+
+    current = ledger.get_run(run.run_id)
+    assert current.candidate_digest is None
+    assert current.candidate_payload is None
+    assert current.manifest_revision == original_revision
+
+
+def test_approval_rolls_back_when_its_audit_event_cannot_be_written(git_repo, tmp_path):
+    ledger = Ledger(tmp_path / "state")
+    run = ledger.create_run(
+        snapshot_repository(git_repo),
+        load_playbook(_local_playbook(tmp_path / "shipyard.toml")),
+    )
+    run = ledger.store_candidate(
+        run.run_id, "a" * 64, {"source": {"sha": run.source_sha}}
+    )
+    original_revision = run.manifest_revision
+    _reject_audit_inserts(ledger)
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected audit failure"):
+        ledger.record_approval(
+            run.run_id,
+            "a" * 64,
+            actor="release-reviewer",
+            reason="approved exact candidate",
+        )
+
+    assert ledger.get_approval(run.run_id) is None
+    assert ledger.get_run(run.run_id).manifest_revision == original_revision
+
+
+def test_adapter_receipt_rolls_back_when_its_audit_event_cannot_be_written(
+    git_repo, tmp_path
+):
+    ledger = Ledger(tmp_path / "state")
+    run = ledger.create_run(
+        snapshot_repository(git_repo),
+        load_playbook(_local_playbook(tmp_path / "shipyard.toml")),
+    )
+    _reject_audit_inserts(ledger)
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected audit failure"):
+        ledger.record_adapter_receipt(
+            run.run_id,
+            0,
+            MutationReceipt(
+                provider="git",
+                action="git.ref",
+                operation_id="git-atomic-receipt",
+                submitted_sha=run.source_sha,
+                evidence={"remote": "origin", "ref": "refs/heads/main"},
+            ),
+        )
+
+    assert ledger.get_adapter_receipt(run.run_id, 0) is None
+
+
+def test_adapter_readback_rolls_back_when_its_audit_event_cannot_be_written(
+    git_repo, tmp_path
+):
+    ledger = Ledger(tmp_path / "state")
+    run = ledger.create_run(
+        snapshot_repository(git_repo),
+        load_playbook(_local_playbook(tmp_path / "shipyard.toml")),
+    )
+    receipt = MutationReceipt(
+        provider="git",
+        action="git.ref",
+        operation_id="git-atomic-readback",
+        submitted_sha=run.source_sha,
+        evidence={"remote": "origin", "ref": "refs/heads/main"},
+    )
+    ledger.record_adapter_receipt(run.run_id, 0, receipt)
+    _reject_audit_inserts(ledger)
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected audit failure"):
+        ledger.record_adapter_readback(
+            run.run_id,
+            0,
+            ProviderReadback(
+                status="succeeded",
+                operation_id=receipt.operation_id,
+                observed_sha=run.source_sha,
+                evidence={"provider_status": "completed"},
+            ),
+        )
+
+    with sqlite3.connect(ledger.database_path) as connection:
+        stored = connection.execute(
+            "SELECT readback_json, provider_status FROM adapter_receipts "
+            "WHERE run_id = ? AND ordinal = ?",
+            (run.run_id, 0),
+        ).fetchone()
+    assert stored == (None, None)
 
 
 def test_stale_manifest_writer_cannot_overwrite_newer_revision(git_repo, tmp_path):

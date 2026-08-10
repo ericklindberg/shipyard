@@ -14,6 +14,7 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ### Security
 
+- Candidate preparation, approval, provider receipt/readback persistence, and their hash-chained audit events now commit atomically; an audit-write failure rolls the governed state change back instead of leaving unaudited authorization or provider evidence.
 - Evidence export refuses changed approved artifacts and existing destinations; verification rejects links, traversal, duplicate/undeclared members, malformed identity bindings, and drifted provider readback.
 
 ## [0.3.0] - 2026-08-10

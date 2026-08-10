@@ -91,6 +91,13 @@ class Ledger:
         return connection
 
     @contextmanager
+    def _governed_transaction(self) -> Iterator[sqlite3.Connection]:
+        """Serialize one governed state change with its audit event."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
+
+    @contextmanager
     def lock_run(self, run_id: str) -> Iterator[None]:
         if not _RUN_ID.fullmatch(run_id):
             raise LedgerError(f"invalid run id: {run_id}")
@@ -297,7 +304,7 @@ class Ledger:
             },
             sort_keys=True,
         )
-        with self._connect() as connection:
+        with self._governed_transaction() as connection:
             connection.execute(
                 """
                 INSERT INTO runs (
@@ -352,16 +359,17 @@ class Ledger:
                     for ordinal, step in enumerate(playbook.steps)
                 ],
             )
-        self.append_audit_event(
-            run_id,
-            "run.created",
-            {
-                "source_sha": snapshot.sha,
-                "playbook_sha256": playbook.digest,
-                "provider": playbook.provider,
-                "destination": playbook.destination,
-            },
-        )
+            self._insert_audit_event(
+                connection,
+                run_id,
+                "run.created",
+                {
+                    "source_sha": snapshot.sha,
+                    "playbook_sha256": playbook.digest,
+                    "provider": playbook.provider,
+                    "destination": playbook.destination,
+                },
+            )
         return self.get_run(run_id)
 
     def get_run(self, run_id: str) -> ReleaseRun:
@@ -588,7 +596,7 @@ class Ledger:
     def store_candidate(
         self, run_id: str, digest: str, payload: dict[str, object]
     ) -> ReleaseRun:
-        with self._connect() as connection:
+        with self._governed_transaction() as connection:
             connection.execute(
                 """
                 UPDATE runs
@@ -598,9 +606,9 @@ class Ledger:
                 """,
                 (digest, json.dumps(payload, sort_keys=True), _now(), run_id),
             )
-        self.append_audit_event(
-            run_id, "candidate.prepared", {"candidate_digest": digest}
-        )
+            self._insert_audit_event(
+                connection, run_id, "candidate.prepared", {"candidate_digest": digest}
+            )
         return self.get_run(run_id)
 
     def record_approval(
@@ -613,7 +621,7 @@ class Ledger:
     ) -> None:
         if not actor.strip() or not reason.strip():
             raise LedgerError("approval actor and reason are required")
-        with self._connect() as connection:
+        with self._governed_transaction() as connection:
             row = connection.execute(
                 "SELECT candidate_digest FROM runs WHERE run_id = ?", (run_id,)
             ).fetchone()
@@ -642,15 +650,16 @@ class Ledger:
                 """,
                 (_now(), run_id),
             )
-        self.append_audit_event(
-            run_id,
-            "candidate.approved",
-            {
-                "candidate_digest": candidate_digest,
-                "actor": actor.strip(),
-                "reason": reason.strip(),
-            },
-        )
+            self._insert_audit_event(
+                connection,
+                run_id,
+                "candidate.approved",
+                {
+                    "candidate_digest": candidate_digest,
+                    "actor": actor.strip(),
+                    "reason": reason.strip(),
+                },
+            )
 
     def get_approval(self, run_id: str) -> dict[str, str] | None:
         with self._connect() as connection:
@@ -662,38 +671,46 @@ class Ledger:
     def append_audit_event(
         self, run_id: str, event_type: str, payload: dict[str, object]
     ) -> dict[str, object]:
+        with self._governed_transaction() as connection:
+            return self._insert_audit_event(connection, run_id, event_type, payload)
+
+    @staticmethod
+    def _insert_audit_event(
+        connection: sqlite3.Connection,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
         created_at = _now()
         canonical_payload = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            previous = connection.execute(
-                """
-                SELECT event_hash FROM audit_events
-                WHERE run_id = ? ORDER BY sequence DESC LIMIT 1
-                """,
-                (run_id,),
-            ).fetchone()
-            previous_hash = previous["event_hash"] if previous else "0" * 64
-            material = "\0".join(
-                (run_id, event_type, canonical_payload, created_at, previous_hash)
-            )
-            event_hash = hashlib.sha256(material.encode()).hexdigest()
-            cursor = connection.execute(
-                """
-                INSERT INTO audit_events (
-                    run_id, event_type, payload_json, created_at,
-                    previous_hash, event_hash
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    event_type,
-                    canonical_payload,
-                    created_at,
-                    previous_hash,
-                    event_hash,
-                ),
-            )
+        previous = connection.execute(
+            """
+            SELECT event_hash FROM audit_events
+            WHERE run_id = ? ORDER BY sequence DESC LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        previous_hash = previous["event_hash"] if previous else "0" * 64
+        material = "\0".join(
+            (run_id, event_type, canonical_payload, created_at, previous_hash)
+        )
+        event_hash = hashlib.sha256(material.encode()).hexdigest()
+        cursor = connection.execute(
+            """
+            INSERT INTO audit_events (
+                run_id, event_type, payload_json, created_at,
+                previous_hash, event_hash
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                event_type,
+                canonical_payload,
+                created_at,
+                previous_hash,
+                event_hash,
+            ),
+        )
         return {
             "sequence": cursor.lastrowid,
             "event_type": event_type,
@@ -731,7 +748,7 @@ class Ledger:
             "submitted_sha": receipt.submitted_sha,
             "evidence": receipt.evidence,
         }
-        with self._connect() as connection:
+        with self._governed_transaction() as connection:
             connection.execute(
                 """
                 INSERT INTO adapter_receipts (
@@ -758,7 +775,7 @@ class Ledger:
                     timestamp,
                 ),
             )
-        self.append_audit_event(run_id, "adapter.receipt", payload)
+            self._insert_audit_event(connection, run_id, "adapter.receipt", payload)
 
     def record_adapter_readback(
         self, run_id: str, ordinal: int, readback: ProviderReadback
@@ -769,7 +786,7 @@ class Ledger:
             "observed_sha": readback.observed_sha,
             "evidence": readback.evidence,
         }
-        with self._connect() as connection:
+        with self._governed_transaction() as connection:
             connection.execute(
                 """
                 UPDATE adapter_receipts
@@ -784,7 +801,7 @@ class Ledger:
                     ordinal,
                 ),
             )
-        self.append_audit_event(run_id, "adapter.readback", payload)
+            self._insert_audit_event(connection, run_id, "adapter.readback", payload)
 
     def get_adapter_receipt(
         self, run_id: str, ordinal: int
