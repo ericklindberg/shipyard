@@ -13,6 +13,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 import shipyard.evidence as evidence_module
 from shipyard.adapters.base import MutationReceipt, ProviderReadback
 from shipyard.candidate import build_candidate
@@ -222,6 +224,26 @@ def _rewrite_bundle(
             archive.addfile(info, io.BytesIO(content))
 
 
+def _mutate_evidence_record(
+    source: Path,
+    destination: Path,
+    mutate: Callable[[dict[str, Any]], None],
+) -> None:
+    def transform(members: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
+        rewritten = []
+        for name, content in members:
+            if name == "evidence.json":
+                envelope = json.loads(content)
+                record = envelope["run"]
+                mutate(record)
+                envelope["record_sha256"] = _canonical_sha256(record)
+                content = (json.dumps(envelope, indent=2, sort_keys=True) + "\n").encode()
+            rewritten.append((name, content))
+        return rewritten
+
+    _rewrite_bundle(source, destination, transform)
+
+
 def _run_cli(args: list[str], *, cwd: Path):
     environment = os.environ.copy()
     source = Path(__file__).parents[1] / "src"
@@ -371,6 +393,54 @@ def test_export_fails_closed_on_successful_readback_sha_drift(git_repo, tmp_path
         assert "provider readback SHA mismatch" in str(exc)
     else:
         raise AssertionError("drifted provider readback was exported")
+
+
+@pytest.mark.parametrize("malformed_status", [[], {}])
+def test_verifier_rejects_unhashable_readback_status(
+    git_repo, tmp_path, malformed_status
+):
+    ledger, run = _completed_provider_run(git_repo, tmp_path)
+    bundle = export_evidence_bundle(ledger, run.run_id, tmp_path / "evidence.tar")
+    malformed = tmp_path / "unhashable-readback-status.tar"
+
+    def alter_readback_status(record):
+        record["status"] = "failed"
+        events = record["audit_events"]
+        readback = next(
+            event for event in events if event["event_type"] == "adapter.readback"
+        )
+        readback["payload"]["status"] = malformed_status
+        _rehash_audit_events(record["run_id"], events)
+        provider_step = next(
+            step for step in record["steps"] if step["effect"] == "external"
+        )
+        provider_step["readback"]["status"] = malformed_status
+        provider_step["provider_status"] = malformed_status
+
+    _mutate_evidence_record(bundle, malformed, alter_readback_status)
+    report = verify_evidence_bundle(malformed)
+
+    assert report["valid"] is False
+    assert report["errors"] == [
+        "adapter readback status is invalid: git-123456789"
+    ]
+
+
+@pytest.mark.parametrize("malformed_status", [[], {}])
+def test_verifier_rejects_unhashable_step_status(git_repo, tmp_path, malformed_status):
+    ledger, run = _completed_provider_run(git_repo, tmp_path)
+    bundle = export_evidence_bundle(ledger, run.run_id, tmp_path / "evidence.tar")
+    malformed = tmp_path / "unhashable-step-status.tar"
+
+    def alter_step_status(record):
+        record["status"] = "failed"
+        record["steps"][0]["status"] = malformed_status
+
+    _mutate_evidence_record(bundle, malformed, alter_step_status)
+    report = verify_evidence_bundle(malformed)
+
+    assert report["valid"] is False
+    assert report["errors"] == ["step status is invalid"]
 
 
 def test_verifier_requires_step_receipt_and_readback_in_audit_chain(git_repo, tmp_path):
@@ -676,6 +746,24 @@ def test_offline_verifier_rejects_unknown_run_status(git_repo, tmp_path):
 
     _rewrite_bundle(bundle, unknown, alter_status)
     report = verify_evidence_bundle(unknown)
+
+    assert report["valid"] is False
+    assert report["errors"] == ["run status is invalid"]
+
+
+@pytest.mark.parametrize("malformed_status", [[], {}])
+def test_offline_verifier_rejects_unhashable_run_status(
+    git_repo, tmp_path, malformed_status
+):
+    ledger, run = _completed_run(git_repo, tmp_path)
+    bundle = export_evidence_bundle(ledger, run.run_id, tmp_path / "evidence.tar")
+    malformed = tmp_path / "unhashable-status.tar"
+
+    def alter_status(record):
+        record["status"] = malformed_status
+
+    _mutate_evidence_record(bundle, malformed, alter_status)
+    report = verify_evidence_bundle(malformed)
 
     assert report["valid"] is False
     assert report["errors"] == ["run status is invalid"]

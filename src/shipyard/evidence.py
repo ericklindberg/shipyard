@@ -448,7 +448,7 @@ def _verify_record_identity(
         run_id_for_chain = run_id
     if not isinstance(source_sha, str) or not _SOURCE_SHA.fullmatch(source_sha):
         errors.append("run source SHA is invalid")
-    if status not in _RUN_STATUSES:
+    if not isinstance(status, str) or status not in _RUN_STATUSES:
         errors.append("run status is invalid")
 
     candidate = record.get("candidate")
@@ -583,7 +583,8 @@ def _collect_steps(
     for step in steps:
         if not isinstance(step, dict):
             continue
-        if step.get("status") not in _STEP_STATUSES:
+        step_status = step.get("status")
+        if not isinstance(step_status, str) or step_status not in _STEP_STATUSES:
             errors.append("step status is invalid")
         operation_id = step.get("operation_id")
         if not isinstance(operation_id, str):
@@ -608,7 +609,10 @@ def _verify_readback_histories(
         terminal_seen = False
         for readback in history:
             readback_status = readback.get("status")
-            if readback_status not in _ADAPTER_STATUSES:
+            if (
+                not isinstance(readback_status, str)
+                or readback_status not in _ADAPTER_STATUSES
+            ):
                 errors.append(f"adapter readback status is invalid: {operation_id}")
             if terminal_seen:
                 errors.append(f"adapter readback follows terminal state: {operation_id}")
@@ -616,7 +620,10 @@ def _verify_readback_histories(
             observed_sha = readback.get("observed_sha")
             if observed_sha is not None and observed_sha != source_sha:
                 errors.append(f"provider readback SHA mismatch: {operation_id}")
-            if readback_status in {"succeeded", "failed"}:
+            if isinstance(readback_status, str) and readback_status in {
+                "succeeded",
+                "failed",
+            }:
                 terminal_seen = True
     return errors
 

@@ -8,6 +8,10 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 - Refactored portable evidence verification into bounded, side-effect-free identity, audit, step, readback, receipt, and orchestration stages while preserving the `shipyard.evidence/v1` report contract and fail-closed validation order.
 
+### Security
+
+- Offline evidence verification now rejects non-string run, step, and provider-readback statuses as invalid evidence instead of allowing unhashable JSON arrays or objects to escape as verifier exceptions.
+
 ## [0.4.0] - 2026-08-10
 
 ### Added
