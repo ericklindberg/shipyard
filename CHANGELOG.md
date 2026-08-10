@@ -18,7 +18,9 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ### Security
 
-- Candidate preparation, approval, provider receipt/readback persistence, and their hash-chained audit events now commit atomically; an audit-write failure rolls the governed state change back instead of leaving unaudited authorization or provider evidence.
+- Candidate preparation, approval, and provider readback persistence now commit atomically with their hash-chained audit events; an audit-write failure rolls those governed state changes back.
+- External mutation receipts use deliberate write-ahead durability: the provider operation ID commits before its audit event because the mutation may already exist, and recovery reconstructs a missing receipt event before read-only reconciliation.
+- Ledger integrity readback now rejects an empty audit chain instead of treating missing audit evidence as valid.
 - Evidence export refuses changed approved artifacts and existing destinations; verification rejects links, traversal, duplicate/undeclared members, malformed identity bindings, and drifted provider readback.
 
 ## [0.3.0] - 2026-08-10

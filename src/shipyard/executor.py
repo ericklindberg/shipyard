@@ -16,7 +16,7 @@ from .adapters.base import AdapterContext, AdapterError, ProviderReadback
 from .adapters.registry import AdapterRegistry
 from .candidate import build_candidate
 from .gitops import snapshot_repository
-from .ledger import Ledger, LedgerError
+from .ledger import Ledger, RunBusyError
 from .models import Playbook, ReleaseRun, StepRun, StepStatus
 from .redact import redact
 from .runtime import resolve_executable, sanitized_environment
@@ -278,6 +278,10 @@ class ReleaseExecutor:
                 status: StepStatus = (
                     "uncertain" if step.effect == "external" else "failed"
                 )
+                if step.effect == "external":
+                    self.ledger.ensure_adapter_receipt_audit_event(
+                        run_id, step.ordinal
+                    )
                 self.ledger.finish_step(
                     run_id,
                     step.ordinal,
@@ -295,7 +299,7 @@ class ReleaseExecutor:
                     {"ordinal": step.ordinal, "status": status},
                 )
                 return self.ledger.set_run_status(run_id, status)
-        except LedgerError:
+        except RunBusyError:
             return self.ledger.get_run(run_id)
 
     def _authorize(
@@ -568,6 +572,7 @@ class ReleaseExecutor:
                     "adapter operation has no durable receipt; manual provider "
                     "reconciliation is required"
                 )
+            self.ledger.ensure_adapter_receipt_audit_event(run_id, step.ordinal)
             adapter = self.adapters.get(step.action)
             readback: ProviderReadback = adapter.readback(
                 self._adapter_context(run, step), receipt

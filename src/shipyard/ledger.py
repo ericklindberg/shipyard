@@ -470,6 +470,8 @@ class Ledger:
 
     def verify_audit_chain(self, run_id: str) -> bool:
         events = self.list_audit_events(run_id)
+        if not events:
+            return False
         previous_hash = "0" * 64
         for event in events:
             canonical_payload = json.dumps(
@@ -748,6 +750,9 @@ class Ledger:
             "submitted_sha": receipt.submitted_sha,
             "evidence": receipt.evidence,
         }
+        # An external mutation may already exist before this method is called. Persist the
+        # provider operation identity first so a later audit failure cannot destroy the
+        # only durable input to read-only reconciliation.
         with self._governed_transaction() as connection:
             connection.execute(
                 """
@@ -775,7 +780,48 @@ class Ledger:
                     timestamp,
                 ),
             )
+        try:
+            self.append_audit_event(run_id, "adapter.receipt", payload)
+        except sqlite3.Error as exc:
+            raise LedgerError(
+                "adapter receipt is durable but its audit event could not be written; "
+                "the provider outcome is uncertain and must be reconciled with resolve"
+            ) from exc
+
+    def ensure_adapter_receipt_audit_event(self, run_id: str, ordinal: int) -> bool:
+        """Append a missing audit event from a durable provider receipt.
+
+        Returns ``True`` only when recovery appended the event. This is intentionally
+        limited to provider receipts: they are the write-ahead record of a mutation
+        that may already have succeeded outside Shipyard.
+        """
+        with self._governed_transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT receipt_json FROM adapter_receipts
+                WHERE run_id = ? AND ordinal = ?
+                """,
+                (run_id, ordinal),
+            ).fetchone()
+            if row is None:
+                return False
+            payload = json.loads(row["receipt_json"])
+            canonical_payload = json.dumps(
+                payload, separators=(",", ":"), sort_keys=True
+            )
+            existing = connection.execute(
+                """
+                SELECT 1 FROM audit_events
+                WHERE run_id = ? AND event_type = 'adapter.receipt'
+                  AND payload_json = ?
+                LIMIT 1
+                """,
+                (run_id, canonical_payload),
+            ).fetchone()
+            if existing is not None:
+                return False
             self._insert_audit_event(connection, run_id, "adapter.receipt", payload)
+            return True
 
     def record_adapter_readback(
         self, run_id: str, ordinal: int, readback: ProviderReadback

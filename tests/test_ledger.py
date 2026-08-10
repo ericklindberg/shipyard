@@ -166,7 +166,19 @@ def test_approval_rolls_back_when_its_audit_event_cannot_be_written(git_repo, tm
     assert ledger.get_run(run.run_id).manifest_revision == original_revision
 
 
-def test_adapter_receipt_rolls_back_when_its_audit_event_cannot_be_written(
+def test_verify_audit_chain_rejects_a_run_with_no_events(git_repo, tmp_path):
+    ledger = Ledger(tmp_path / "state")
+    run = ledger.create_run(
+        snapshot_repository(git_repo),
+        load_playbook(_local_playbook(tmp_path / "shipyard.toml")),
+    )
+    with sqlite3.connect(ledger.database_path) as connection:
+        connection.execute("DELETE FROM audit_events WHERE run_id = ?", (run.run_id,))
+
+    assert ledger.verify_audit_chain(run.run_id) is False
+
+
+def test_adapter_receipt_remains_durable_when_its_audit_event_cannot_be_written(
     git_repo, tmp_path
 ):
     ledger = Ledger(tmp_path / "state")
@@ -176,7 +188,7 @@ def test_adapter_receipt_rolls_back_when_its_audit_event_cannot_be_written(
     )
     _reject_audit_inserts(ledger)
 
-    with pytest.raises(sqlite3.IntegrityError, match="injected audit failure"):
+    with pytest.raises(LedgerError, match="receipt is durable"):
         ledger.record_adapter_receipt(
             run.run_id,
             0,
@@ -189,7 +201,12 @@ def test_adapter_receipt_rolls_back_when_its_audit_event_cannot_be_written(
             ),
         )
 
-    assert ledger.get_adapter_receipt(run.run_id, 0) is None
+    stored = ledger.get_adapter_receipt(run.run_id, 0)
+    assert stored is not None
+    assert stored.operation_id == "git-atomic-receipt"
+    assert "adapter.receipt" not in {
+        event["event_type"] for event in ledger.list_audit_events(run.run_id)
+    }
 
 
 def test_adapter_readback_rolls_back_when_its_audit_event_cannot_be_written(

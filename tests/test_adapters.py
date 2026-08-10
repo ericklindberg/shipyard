@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +25,7 @@ from shipyard.adapters.providers import (
 )
 from shipyard.adapters.registry import AdapterRegistry
 from shipyard.executor import ProvenanceDriftError, ReleaseExecutor
-from shipyard.ledger import Ledger
+from shipyard.ledger import Ledger, LedgerError
 from shipyard.playbook import PlaybookError, load_playbook
 
 SHA = "a" * 40
@@ -637,6 +638,115 @@ class SequenceAdapter:
             adapter_context.source_sha if status == "succeeded" else None,
             {"provider_status": "live" if status == "succeeded" else "build"},
         )
+
+
+class ReceiptAuditFailureAdapter(SequenceAdapter):
+    def __init__(self, ledger: Ledger):
+        super().__init__()
+        self.ledger = ledger
+        self.readbacks = ["succeeded"]
+
+    def execute(self, adapter_context):
+        receipt = super().execute(adapter_context)
+        with sqlite3.connect(self.ledger.database_path) as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER reject_adapter_receipt_audit
+                BEFORE INSERT ON audit_events
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected receipt audit failure');
+                END;
+                """
+            )
+        return receipt
+
+
+def test_receipt_audit_failure_preserves_recoverable_provider_identity(
+    git_repo, tmp_path
+):
+    ledger = Ledger(tmp_path / "state")
+    adapter = ReceiptAuditFailureAdapter(ledger)
+    executor = ReleaseExecutor(ledger, AdapterRegistry([adapter]))
+    prepared = executor.start(git_repo, load_playbook(typed_playbook(tmp_path)))
+
+    with pytest.raises(LedgerError, match="receipt is durable"):
+        executor.resume(
+            prepared.run_id,
+            execute_external=True,
+            confirm_sha=prepared.source_sha,
+            approve_candidate=prepared.candidate_digest,
+            approval_actor="pytest",
+            approval_reason="contract test",
+        )
+
+    receipt = ledger.get_adapter_receipt(prepared.run_id, 0)
+    assert receipt is not None
+    assert receipt.operation_id == "dep-1"
+    with sqlite3.connect(ledger.database_path) as connection:
+        connection.execute("DROP TRIGGER reject_adapter_receipt_audit")
+
+    uncertain = ledger.get_run(prepared.run_id)
+    assert uncertain.status == "uncertain"
+    assert uncertain.steps[0].operation_id == "dep-1"
+    resolved = executor.resolve(prepared.run_id)
+    assert resolved.status == "succeeded"
+    event_types = [
+        event["event_type"] for event in ledger.list_audit_events(prepared.run_id)
+    ]
+    assert event_types.count("adapter.receipt") == 1
+    assert event_types.count("adapter.readback") == 1
+    assert ledger.verify_audit_chain(prepared.run_id) is True
+
+
+def test_process_loss_after_receipt_commit_repairs_audit_before_readback(
+    git_repo, tmp_path
+):
+    ledger = Ledger(tmp_path / "state")
+    adapter = SequenceAdapter()
+    adapter.readbacks = ["succeeded"]
+    executor = ReleaseExecutor(ledger, AdapterRegistry([adapter]))
+    prepared = executor.start(git_repo, load_playbook(typed_playbook(tmp_path)))
+    ledger.begin_step(prepared.run_id, 0)
+    ledger.append_audit_event(
+        prepared.run_id,
+        "adapter.mutation_started",
+        {
+            "ordinal": 0,
+            "action": adapter.action,
+            "candidate_digest": prepared.candidate_digest,
+            "source_sha": prepared.source_sha,
+        },
+    )
+    receipt = adapter.execute(
+        executor._adapter_context(
+            ledger.get_run(prepared.run_id), prepared.steps[0]
+        )
+    )
+    with sqlite3.connect(ledger.database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_adapter_receipt_audit
+            BEFORE INSERT ON audit_events
+            BEGIN
+                SELECT RAISE(ABORT, 'injected receipt audit failure');
+            END;
+            """
+        )
+    with pytest.raises(LedgerError, match="receipt is durable"):
+        ledger.record_adapter_receipt(prepared.run_id, 0, receipt)
+    with sqlite3.connect(ledger.database_path) as connection:
+        connection.execute("DROP TRIGGER reject_adapter_receipt_audit")
+
+    recovered = executor.recover_stale(prepared.run_id)
+
+    assert recovered.status == "uncertain"
+    assert recovered.steps[0].operation_id == "dep-1"
+    event_types = [
+        event["event_type"] for event in ledger.list_audit_events(prepared.run_id)
+    ]
+    assert event_types.count("adapter.receipt") == 1
+    assert event_types.count("attempt.recovered_stale") == 1
+    assert executor.resolve(prepared.run_id).status == "succeeded"
 
 
 def test_typed_adapter_run_quarantines_pending_then_resolves_read_only(
