@@ -16,7 +16,7 @@ from shipyard.web import create_server
 
 
 def test_init_generates_valid_typed_provider_playbooks(tmp_path):
-    for provider in ("github", "buzz", "render", "heroku", "vercel"):
+    for provider in ("github", "github-actions", "buzz", "render", "heroku", "vercel"):
         destination = tmp_path / f"{provider}.toml"
         assert main(["init", provider, "--output", str(destination), "--json"]) == 0
         playbook = load_playbook(destination)

@@ -99,11 +99,13 @@ _LOCAL_EXECUTABLES = {
 _ADAPTER_ACTIONS = {
     "buzz.workflow",
     "git.ref",
+    "github.workflow",
     "heroku.build",
     "render.deploy",
     "vercel.deploy",
 }
 _ACTION_ENV_PREFIX = {
+    "github.workflow": "GITHUB_",
     "heroku.build": "HEROKU_",
     "render.deploy": "RENDER_",
     "vercel.deploy": "VERCEL_",

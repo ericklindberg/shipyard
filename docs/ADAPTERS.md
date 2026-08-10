@@ -15,12 +15,13 @@ A receipt is never sufficient evidence of success. The executor marks a step suc
 | Action | Provider use | Immutable input | Semantic readback |
 |---|---|---|---|
 | `git.ref` | GitHub, Buzz Git, other Git servers | full Git SHA + canonical ref | exact `ls-remote` ref SHA |
+| `github.workflow` | GitHub Actions on GitHub.com | full Git SHA + canonical repository/workflow IDs + SHA-suffixed candidate tag | durable run ID, exact repository/workflow/event/head SHA, status and conclusion |
 | `buzz.workflow` | Buzz workflows | candidate source SHA input | matching workflow run and input |
 | `render.deploy` | Render services | commit ID | deploy status and commit ID |
 | `heroku.build` | Heroku builds | source-blob version | build status and source version |
 | `vercel.deploy` | Vercel projects | Git ref/SHA | deployment state and Git SHA |
 
-These adapters have deterministic fake-provider contract tests. Activation against a real account remains an operator decision and requires provider credentials plus an authorized sandbox validation.
+These adapters have deterministic fake-provider contract tests. The GitHub Actions adapter uses the GitHub REST API version `2026-03-10` workflow-dispatch response so a mutation returns a durable workflow-run ID. Activation against a real account remains an operator decision and requires provider credentials plus an authorized sandbox validation.
 
 ## Recommended next profiles
 

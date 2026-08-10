@@ -3,6 +3,7 @@ from __future__ import annotations
 from .base import AdapterError, DeploymentAdapter
 from .providers import (
     BuzzWorkflowAdapter,
+    GitHubWorkflowAdapter,
     GitRefAdapter,
     HerokuBuildAdapter,
     RenderAdapter,
@@ -14,6 +15,7 @@ class AdapterRegistry:
     def __init__(self, adapters: list[DeploymentAdapter] | None = None) -> None:
         configured = adapters or [
             GitRefAdapter(),
+            GitHubWorkflowAdapter(),
             BuzzWorkflowAdapter(),
             RenderAdapter(),
             HerokuBuildAdapter(),

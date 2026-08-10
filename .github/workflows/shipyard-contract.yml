@@ -1,50 +1,37 @@
-name: CI
+name: Shipyard exact-SHA gate
+run-name: "Shipyard ${{ inputs.shipyard_run_id }} @ ${{ inputs.shipyard_candidate_sha }}"
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      shipyard_candidate_sha:
+        description: Exact 40-character source SHA approved by Shipyard
+        required: true
+        type: string
+      shipyard_run_id:
+        description: Correlation ID from the local Shipyard ledger
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    name: test-${{ matrix.os }}-py${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            python-version: "3.11"
-          - os: ubuntu-latest
-            python-version: "3.12"
-          - os: ubuntu-latest
-            python-version: "3.13"
-          - os: macos-14
-            python-version: "3.11"
-          - os: macos-14
-            python-version: "3.13"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          enable-cache: true
-          python-version: ${{ matrix.python-version }}
-      - run: uv sync --extra dev --locked
-      - run: uv run pytest -q
-      - run: uv run ruff check src tests scripts
-      - run: uv run ty check src scripts
-      - run: uv run bandit -q -r src scripts -ll -s B404,B603,B607
-      - run: uv build
-      - run: git diff --check
-      - run: git diff --exit-code
-
-  supply-chain:
+  verify-candidate:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.shipyard_candidate_sha }}
+      - name: Verify exact candidate source
+        env:
+          EXPECTED_SHA: ${{ inputs.shipyard_candidate_sha }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$GITHUB_SHA" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
@@ -58,6 +45,10 @@ jobs:
           trap 'rm -f "$requirements"' EXIT
           uv export --extra dev --no-emit-project --locked --output-file "$requirements"
           uv run pip-audit --requirement "$requirements" --require-hashes --disable-pip --strict --progress-spinner off
+      - run: uv run pytest -q
+      - run: uv run ruff check src tests scripts
+      - run: uv run ty check src scripts
+      - run: uv run bandit -q -r src scripts -ll -s B404,B603,B607
       - run: uv build
       - name: Generate reproducible runtime CycloneDX SBOM
         run: |
@@ -73,7 +64,7 @@ jobs:
       - run: git diff --exit-code
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: shipyard-${{ github.sha }}
+          name: shipyard-gate-${{ inputs.shipyard_candidate_sha }}
           path: dist/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7

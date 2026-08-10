@@ -32,11 +32,19 @@ _REMOTE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 _RESOURCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
 _SCHEMA_VERSION = 1
 _PROVIDER_ENV_PREFIX = {
+    "github-actions": "GITHUB_",
     "render": "RENDER_",
     "heroku": "HEROKU_",
     "vercel": "VERCEL_",
 }
 _PROVIDER_RESOURCE_KEYS = {
+    "github-actions": (
+        "owner",
+        "repo",
+        "repository_id",
+        "workflow_id",
+        "workflow_file",
+    ),
     "buzz": ("workflow_id",),
     "render": ("service_id",),
     "heroku": ("app",),
@@ -45,6 +53,7 @@ _PROVIDER_RESOURCE_KEYS = {
 
 _PROVIDER_ACTIONS = {
     "github": "git.ref",
+    "github-actions": "github.workflow",
     "buzz-git": "git.ref",
     "buzz": "buzz.workflow",
     "render": "render.deploy",
@@ -53,6 +62,17 @@ _PROVIDER_ACTIONS = {
 }
 _PROVIDER_OPTIONS = {
     "github": frozenset({"remote", "ref"}),
+    "github-actions": frozenset(
+        {
+            "owner",
+            "repo",
+            "repository_id",
+            "workflow_id",
+            "workflow_file",
+            "ref",
+            "token_env",
+        }
+    ),
     "buzz-git": frozenset({"remote", "ref"}),
     "buzz": frozenset({"workflow_id"}),
     "render": frozenset({"service_id", "token_env"}),
@@ -61,6 +81,17 @@ _PROVIDER_OPTIONS = {
 }
 _REQUIRED_OPTIONS = {
     "github": frozenset({"remote", "ref"}),
+    "github-actions": frozenset(
+        {
+            "owner",
+            "repo",
+            "repository_id",
+            "workflow_id",
+            "workflow_file",
+            "ref",
+            "token_env",
+        }
+    ),
     "buzz-git": frozenset({"remote", "ref"}),
     "buzz": frozenset({"workflow_id"}),
     "render": frozenset({"service_id", "token_env"}),
@@ -148,6 +179,28 @@ def _validate_options(provider: str, raw: dict[str, object]) -> dict[str, object
         ref = _require_string(options, "ref")
         if not _EXACT_REF.fullmatch(ref) or ".." in ref or ref.endswith("/"):
             raise ConnectionError("github ref must be a canonical refs/heads/* or refs/tags/* ref")
+    if provider == "github-actions":
+        repository_id = _require_string(options, "repository_id")
+        workflow_id = _require_string(options, "workflow_id")
+        workflow_file = _require_string(options, "workflow_file")
+        ref = _require_string(options, "ref")
+        if not repository_id.isdecimal() or not workflow_id.isdecimal():
+            raise ConnectionError("GitHub Actions repository and workflow ids must be numeric")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", workflow_file):
+            raise ConnectionError("GitHub Actions workflow file must be a .yml or .yaml file name")
+        exact_candidate_tag = re.fullmatch(
+            r"refs/tags/[A-Za-z0-9][A-Za-z0-9._/-]*-[0-9a-f]{40}", ref
+        )
+        candidate_tag_template = re.fullmatch(
+            r"refs/tags/[A-Za-z0-9][A-Za-z0-9._/-]*-\{source_sha\}", ref
+        )
+        if ".." in ref or ref.endswith("/") or not (
+            exact_candidate_tag or candidate_tag_template
+        ):
+            raise ConnectionError(
+                "GitHub Actions ref must be an immutable candidate tag ending in its "
+                "40-character SHA or {source_sha}"
+            )
     return options
 
 
@@ -156,6 +209,11 @@ def _destination(provider: str, options: dict[str, object]) -> str:
         return f"{provider}:{options['remote']}:{options['ref']}"
     if provider == "buzz":
         return f"buzz:{options['workflow_id']}"
+    if provider == "github-actions":
+        return (
+            f"github-actions:{options['repository_id']}:"
+            f"{options['workflow_id']}:{options['ref']}"
+        )
     if provider == "render":
         return f"render:{options['service_id']}"
     if provider == "heroku":

@@ -1,0 +1,31 @@
+name: Shipyard release gate
+run-name: "Shipyard ${{ inputs.shipyard_run_id }} @ ${{ inputs.shipyard_candidate_sha }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      shipyard_candidate_sha:
+        description: Exact 40-character source SHA approved by Shipyard
+        required: true
+        type: string
+      shipyard_run_id:
+        description: Correlation ID from the local Shipyard ledger
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-candidate:
+    runs-on: ubuntu-latest
+    env:
+      APPROVED_SHA: ${{ inputs.shipyard_candidate_sha }}
+    steps:
+      - name: Verify the workflow event resolved the approved source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_SHA" = "$APPROVED_SHA"
+          printf 'Approved source: %s\n' "$APPROVED_SHA"
+      # Add project-specific, SHA-pinned actions only after this identity gate.

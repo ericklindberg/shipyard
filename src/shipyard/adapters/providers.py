@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import quote
 
@@ -24,6 +24,9 @@ from .http import HttpResponse, HttpTransport, UrllibTransport
 CommandRunner = Callable[[tuple[str, ...], Path, tuple[str, ...]], tuple[int, str]]
 _EXACT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _EXACT_REF = re.compile(r"^refs/(?:heads|tags)/[A-Za-z0-9._/-]+$")
+_CANDIDATE_TAG_TEMPLATE = re.compile(
+    r"^refs/tags/[A-Za-z0-9][A-Za-z0-9._/-]*-\{source_sha\}$"
+)
 _NAMED_GIT_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 
 
@@ -182,6 +185,225 @@ class _HttpAdapter:
     def _require_success(response: HttpResponse, operation: str) -> None:
         if not 200 <= response.status < 300:
             raise AdapterError(f"{operation} failed with status {response.status}")
+
+
+class GitHubWorkflowAdapter(_HttpAdapter):
+    action = "github.workflow"
+    credential_prefix = "GITHUB_"
+
+    def _headers(self, context: AdapterContext) -> dict[str, str]:
+        return {
+            **super()._headers(context),
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2026-03-10",
+        }
+
+    @staticmethod
+    def _coordinates(context: AdapterContext) -> tuple[str, str, str, str, str, str]:
+        owner = _config_string(context, "owner")
+        repo = _config_string(context, "repo")
+        repository_id = _config_string(context, "repository_id")
+        workflow_id = _config_string(context, "workflow_id")
+        workflow_file = _config_string(context, "workflow_file")
+        ref = _config_string(context, "ref")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner):
+            raise AdapterError("github.workflow owner is invalid")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
+            raise AdapterError("github.workflow repository is invalid")
+        if not repository_id.isdecimal() or not workflow_id.isdecimal():
+            raise AdapterError("github.workflow requires numeric repository and workflow ids")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", workflow_file):
+            raise AdapterError("github.workflow requires a workflow .yml or .yaml file name")
+        if (
+            not (_EXACT_REF.fullmatch(ref) or _CANDIDATE_TAG_TEMPLATE.fullmatch(ref))
+            or ".." in ref
+            or ref.endswith("/")
+        ):
+            raise AdapterError(
+                "github.workflow requires a canonical refs/heads/* or refs/tags/* ref"
+            )
+        return owner, repo, repository_id, workflow_id, workflow_file, ref
+
+    def _identity(
+        self, context: AdapterContext
+    ) -> tuple[str, str, str, str, str, str, dict[str, object]]:
+        owner, repo, repository_id, workflow_id, workflow_file, ref = self._coordinates(context)
+        base = self._base(context, "https://api.github.com")
+        repository = self.transport.request(
+            "GET",
+            f"{base}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}",
+            headers=self._headers(context),
+        )
+        self._require_success(repository, "GitHub repository verification")
+        if str(repository.payload.get("id")) != repository_id:
+            raise AdapterError("GitHub repository verification returned a different repository id")
+        expected_name = f"{owner}/{repo}"
+        full_name = repository.payload.get("full_name")
+        if not isinstance(full_name, str) or full_name.casefold() != expected_name.casefold():
+            raise AdapterError("GitHub repository verification returned a different repository")
+        workflow = self.transport.request(
+            "GET",
+            f"{base}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+            f"/actions/workflows/{quote(workflow_id, safe='')}",
+            headers=self._headers(context),
+        )
+        self._require_success(workflow, "GitHub workflow verification")
+        if str(workflow.payload.get("id")) != workflow_id:
+            raise AdapterError("GitHub workflow verification returned a different workflow id")
+        expected_path = f".github/workflows/{workflow_file}"
+        if workflow.payload.get("path") != expected_path:
+            raise AdapterError("GitHub workflow verification returned a different workflow file")
+        if workflow.payload.get("state") != "active":
+            raise AdapterError("GitHub workflow is not active")
+        return owner, repo, repository_id, workflow_id, workflow_file, ref, workflow.payload
+
+    def check(self, context: AdapterContext) -> ConnectionCheck:
+        owner, repo, repository_id, workflow_id, workflow_file, ref, _ = self._identity(context)
+        return ConnectionCheck(
+            "verified",
+            context.provider,
+            self.action,
+            f"{repository_id}:{workflow_id}",
+            {
+                "repository": f"{owner}/{repo}",
+                "workflow_file": workflow_file,
+                "ref": ref,
+            },
+        )
+
+    @staticmethod
+    def _dispatch_ref(ref: str) -> str:
+        for prefix in ("refs/heads/", "refs/tags/"):
+            if ref.startswith(prefix):
+                return ref.removeprefix(prefix)
+        raise AdapterError("github.workflow requires a branch or tag ref")
+
+    @staticmethod
+    def _require_immutable_candidate_tag(ref: str, source_sha: str) -> None:
+        expected_suffix = f"-{source_sha}"
+        if not ref.startswith("refs/tags/") or not ref.endswith(expected_suffix):
+            raise AdapterError(
+                "github.workflow requires an immutable candidate tag ending in the approved SHA"
+            )
+
+    @staticmethod
+    def _resolved_context(context: AdapterContext) -> AdapterContext:
+        configured_ref = _config_string(context, "ref")
+        resolved_ref = configured_ref.replace("{source_sha}", context.source_sha)
+        return replace(context, config={**context.config, "ref": resolved_ref})
+
+    def execute(self, context: AdapterContext) -> MutationReceipt:
+        resolved_context = self._resolved_context(context)
+        configured_ref = _config_string(resolved_context, "ref")
+        self._require_immutable_candidate_tag(configured_ref, context.source_sha)
+        owner, repo, repository_id, workflow_id, workflow_file, ref, _ = self._identity(
+            resolved_context
+        )
+        dispatch_ref = self._dispatch_ref(ref)
+        base = self._base(context, "https://api.github.com")
+        commit = self.transport.request(
+            "GET",
+            f"{base}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+            f"/commits/{quote(dispatch_ref, safe='')}",
+            headers=self._headers(context),
+        )
+        self._require_success(commit, "GitHub workflow ref verification")
+        if commit.payload.get("sha") != context.source_sha:
+            raise AdapterError("GitHub workflow ref does not resolve to the approved source SHA")
+        response = self.transport.request(
+            "POST",
+            f"{base}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+            f"/actions/workflows/{quote(workflow_id, safe='')}/dispatches",
+            headers=self._headers(context),
+            body={
+                "ref": dispatch_ref,
+                "inputs": {
+                    "shipyard_candidate_sha": context.source_sha,
+                    "shipyard_run_id": context.run_id,
+                },
+                "return_run_details": True,
+            },
+        )
+        if response.status != 200:
+            raise AdapterError(
+                "GitHub workflow dispatch did not return a durable run id; "
+                "outcome requires readback"
+            )
+        operation_id = response.payload.get("workflow_run_id")
+        if not isinstance(operation_id, int) or isinstance(operation_id, bool):
+            raise AdapterError("GitHub workflow dispatch omitted workflow run id")
+        return MutationReceipt(
+            context.provider,
+            self.action,
+            str(operation_id),
+            context.source_sha,
+            {
+                "repository_id": repository_id,
+                "workflow_id": workflow_id,
+                "workflow_file": workflow_file,
+                "ref": ref,
+                "html_url": response.payload.get("html_url"),
+            },
+        )
+
+    def readback(
+        self, context: AdapterContext, receipt: MutationReceipt
+    ) -> ProviderReadback:
+        context = self._resolved_context(context)
+        owner, repo, repository_id, workflow_id, workflow_file, ref = self._coordinates(
+            context
+        )
+        base = self._base(context, "https://api.github.com")
+        response = self.transport.request(
+            "GET",
+            f"{base}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+            f"/actions/runs/{quote(receipt.operation_id, safe='')}",
+            headers=self._headers(context),
+        )
+        self._require_success(response, "GitHub workflow run readback")
+        payload = response.payload
+        observed = payload.get("head_sha")
+        repository = payload.get("repository")
+        observed_repository_id = (
+            str(repository.get("id")) if isinstance(repository, dict) else None
+        )
+        identity_matches = (
+            str(payload.get("id")) == receipt.operation_id
+            and str(payload.get("workflow_id")) == workflow_id
+            and observed_repository_id == repository_id
+            and payload.get("event") == "workflow_dispatch"
+        )
+        provider_status = payload.get("status")
+        conclusion = payload.get("conclusion")
+        if not identity_matches or observed != receipt.submitted_sha:
+            status: AdapterStatus = "failed"
+        elif provider_status == "completed" and conclusion != "success":
+            status = "failed"
+        elif provider_status == "completed" and conclusion == "success":
+            status = "succeeded"
+        elif provider_status in {
+            "queued",
+            "in_progress",
+            "pending",
+            "requested",
+            "waiting",
+        }:
+            status = "pending"
+        else:
+            status = "unknown"
+        return ProviderReadback(
+            status,
+            receipt.operation_id,
+            observed if isinstance(observed, str) else None,
+            {
+                "repository": f"{owner}/{repo}",
+                "workflow_file": workflow_file,
+                "ref": ref,
+                "provider_status": provider_status,
+                "conclusion": conclusion,
+                "html_url": payload.get("html_url"),
+            },
+        )
 
 
 class RenderAdapter(_HttpAdapter):

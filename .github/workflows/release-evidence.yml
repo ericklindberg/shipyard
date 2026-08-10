@@ -44,9 +44,15 @@ jobs:
       - run: uv run ty check src scripts
       - run: uv run bandit -q -r src scripts -ll -s B404,B603,B607
       - run: uv build
-      - name: Generate reproducible CycloneDX SBOM
-        run: uv run cyclonedx-py environment .venv --pyproject pyproject.toml --mc-type application --sv 1.6 --output-reproducible --output-format JSON --output-file dist/shipyard-0.3.0.cdx.json
-      - run: python scripts/write_checksums.py --directory dist --output dist/SHA256SUMS --file gary_shipyard-0.3.0-py3-none-any.whl --file gary_shipyard-0.3.0.tar.gz --file shipyard-0.3.0.cdx.json
+      - name: Generate reproducible runtime CycloneDX SBOM
+        run: |
+          uv venv .runtime-sbom
+          uv pip install --python .runtime-sbom/bin/python --no-deps dist/gary_shipyard-0.3.0-py3-none-any.whl
+          uv run cyclonedx-py environment .runtime-sbom/bin/python --pyproject pyproject.toml --mc-type application --sv 1.6 --output-reproducible --output-format JSON --output-file dist/shipyard-0.3.0-runtime.cdx.json
+          rm -rf .runtime-sbom
+      - name: Generate reproducible build-environment CycloneDX SBOM
+        run: uv run cyclonedx-py environment .venv --pyproject pyproject.toml --mc-type application --sv 1.6 --output-reproducible --output-format JSON --output-file dist/shipyard-0.3.0-build.cdx.json
+      - run: python scripts/write_checksums.py --directory dist --output dist/SHA256SUMS --file gary_shipyard-0.3.0-py3-none-any.whl --file gary_shipyard-0.3.0.tar.gz --file shipyard-0.3.0-runtime.cdx.json --file shipyard-0.3.0-build.cdx.json
       - run: git diff --check
       - run: git diff --exit-code
       - name: Attest exact candidate artifacts
@@ -55,7 +61,8 @@ jobs:
           subject-path: |
             dist/gary_shipyard-0.3.0-py3-none-any.whl
             dist/gary_shipyard-0.3.0.tar.gz
-            dist/shipyard-0.3.0.cdx.json
+            dist/shipyard-0.3.0-runtime.cdx.json
+            dist/shipyard-0.3.0-build.cdx.json
             dist/SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

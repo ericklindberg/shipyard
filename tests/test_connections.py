@@ -17,6 +17,8 @@ from shipyard.connections import (
 )
 from shipyard.playbook import load_playbook
 
+SHA = "a" * 40
+
 
 def json_data(text: str):
     envelope = json.loads(text)
@@ -157,11 +159,25 @@ def test_all_supported_provider_profiles_validate_and_expose_only_secret_presenc
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = ConnectionStore(tmp_path / "config")
+    monkeypatch.delenv("GITHUB_ACTIONS_TOKEN", raising=False)
     profiles = [
         store.add(
             "github-production",
             "github",
             {"remote": "origin", "ref": "refs/heads/main"},
+        ),
+        store.add(
+            "github-actions-production",
+            "github-actions",
+            {
+                "owner": "owner",
+                "repo": "mobile-app",
+                "repository_id": "1234",
+                "workflow_id": "5678",
+                "workflow_file": "release.yml",
+                "ref": f"refs/tags/shipyard-candidate-{SHA}",
+                "token_env": "GITHUB_ACTIONS_TOKEN",
+            },
         ),
         store.add(
             "buzz-git-production",
@@ -203,6 +219,14 @@ def test_all_supported_provider_profiles_validate_and_expose_only_secret_presenc
     public = {profile.name: profile.public_payload() for profile in profiles}
 
     assert public["github-production"]["credential_env"] == []
+    assert public["github-actions-production"]["credential_env"] == [
+        {
+            "name": "GITHUB_ACTIONS_TOKEN",
+            "present": False,
+            "purpose": "runtime",
+            "required": True,
+        }
+    ]
     assert public["buzz-git-production"]["action"] == "git.ref"
     assert public["buzz-git-production"]["credential_env"] == []
     assert public["buzz-production"]["credential_env"] == [
@@ -240,6 +264,19 @@ def test_all_supported_provider_profiles_validate_and_expose_only_secret_presenc
     ("provider", "options", "expected_action"),
     [
         ("github", {"remote": "origin", "ref": "refs/heads/main"}, "git.ref"),
+        (
+            "github-actions",
+            {
+                "owner": "owner",
+                "repo": "mobile-app",
+                "repository_id": "1234",
+                "workflow_id": "5678",
+                "workflow_file": "release.yml",
+                "ref": f"refs/tags/shipyard-candidate-{SHA}",
+                "token_env": "GITHUB_ACTIONS_TOKEN",
+            },
+            "github.workflow",
+        ),
         ("buzz", {"workflow_id": "workflow-example"}, "buzz.workflow"),
         (
             "render",
@@ -318,6 +355,48 @@ def test_connection_profile_rejects_invalid_names_refs_and_environment_reference
             "render",
             {"service_id": "srv-example", "token_env": "not valid"},
         )
+    with pytest.raises(ConnectionError, match="provider identifier"):
+        ConnectionProfile.create(
+            "github-actions-production",
+            "github-actions",
+            {
+                "owner": "owner",
+                "repo": "mobile-app",
+                "repository_id": "1234",
+                "workflow_id": "5678",
+                "workflow_file": "../release.yml",
+                "ref": f"refs/tags/shipyard-candidate-{SHA}",
+                "token_env": "GITHUB_ACTIONS_TOKEN",
+            },
+        )
+    with pytest.raises(ConnectionError, match="immutable candidate tag"):
+        ConnectionProfile.create(
+            "github-actions-production",
+            "github-actions",
+            {
+                "owner": "owner",
+                "repo": "mobile-app",
+                "repository_id": "1234",
+                "workflow_id": "5678",
+                "workflow_file": "release.yml",
+                "ref": "refs/heads/release",
+                "token_env": "GITHUB_ACTIONS_TOKEN",
+            },
+        )
+    with pytest.raises(ConnectionError, match="must use a GITHUB_"):
+        ConnectionProfile.create(
+            "github-actions-production",
+            "github-actions",
+            {
+                "owner": "owner",
+                "repo": "mobile-app",
+                "repository_id": "1234",
+                "workflow_id": "5678",
+                "workflow_file": "release.yml",
+                "ref": f"refs/tags/shipyard-candidate-{SHA}",
+                "token_env": "AWS_SECRET_ACCESS_KEY",
+            },
+        )
 
 
 class _CheckAdapter:
@@ -372,6 +451,73 @@ def test_connection_verification_is_offline_by_default_and_requires_credentials(
     assert verified["network_checked"] is True
     assert verified["mutation_performed"] is False
     assert adapter.calls == 1
+
+
+def test_connection_cli_adds_github_actions_profile_and_generates_playbook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_dir = tmp_path / "config"
+    output = tmp_path / "github-actions.toml"
+    monkeypatch.setenv("GITHUB_ACTIONS_TOKEN", "cli-secret")
+
+    assert (
+        main(
+            [
+                "connection",
+                "add",
+                "apple-release",
+                "--provider",
+                "github-actions",
+                "--owner",
+                "owner",
+                "--repo-name",
+                "mobile-app",
+                "--repository-id",
+                "1234",
+                "--workflow-id",
+                "5678",
+                "--workflow-file",
+                "release.yml",
+                "--ref",
+                f"refs/tags/shipyard-candidate-{SHA}",
+                "--token-env",
+                "GITHUB_ACTIONS_TOKEN",
+                "--config-dir",
+                str(config_dir),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    added = json_data(capsys.readouterr().out)
+    assert added["connection"]["action"] == "github.workflow"
+    assert added["connection"]["destination"] == (
+        f"github-actions:1234:5678:refs/tags/shipyard-candidate-{SHA}"
+    )
+    assert "cli-secret" not in json.dumps(added)
+
+    assert (
+        main(
+            [
+                "connection",
+                "playbook",
+                "apple-release",
+                "--output",
+                str(output),
+                "--config-dir",
+                str(config_dir),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    playbook = load_playbook(output)
+    assert playbook.steps[0].action == "github.workflow"
+    assert playbook.steps[0].config["repository_id"] == "1234"
+    assert playbook.steps[0].config["workflow_id"] == "5678"
 
 
 def test_connection_cli_add_list_show_check_playbook_and_remove(

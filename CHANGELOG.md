@@ -4,10 +4,15 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-09
+
 ### Added
 
+- Added a typed `github.workflow` adapter, private reusable `github-actions` profiles, SHA-suffixed immutable candidate-tag dispatch fencing, durable workflow-run receipts, semantic run readback, and a non-mutating workflow contract example.
 - Added a versioned `shipyard.cli/v1` success/error envelope for every handled `--json` command result.
-- Added Linux and macOS CI coverage, a locked dependency audit, a tracked-candidate secret scan, reproducible CycloneDX SBOM generation, deterministic checksums, and exact-SHA GitHub artifact attestations.
+- Added Linux and macOS CI coverage, a locked dependency audit, a tracked-candidate secret scan, separate reproducible runtime/build CycloneDX SBOMs, deterministic checksums, and exact-SHA GitHub artifact attestations.
+- Pinned the isolated setuptools/wheel build environment to prevent release artifacts drifting as package indexes change.
+- Included operator, contributor, workflow, script, and example material in source distributions.
 - Added an explicitly gated provider sandbox-validation harness and status matrix.
 
 - Private, user-scoped connection profiles for GitHub/Git, Buzz, Render, Heroku, and Vercel.
@@ -30,7 +35,7 @@ All notable changes to Shipyard will be documented in this file. The format foll
 - Added loopback Host validation and same-origin resource policy to block DNS-rebinding reads.
 - Pinned GitHub Actions dependencies to immutable commit SHAs.
 
-## [0.2.0] - 2026-08-08
+## 0.2.0 - 2026-08-08
 
 ### Added
 
@@ -42,12 +47,13 @@ All notable changes to Shipyard will be documented in this file. The format foll
 - Bound approvals to source, policy, target, artifact, runtime, executable, and provider evidence.
 - Required provider semantic readback before recording external success.
 
-## [0.1.0] - 2026-08-08
+## 0.1.0 - 2026-08-08
 
 ### Added
 
 - Initial local-first exact-SHA release orchestration MVP.
 
-[Unreleased]: https://github.com/ericklindberg/shipyard/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/ericklindberg/shipyard/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/ericklindberg/shipyard/releases/tag/v0.1.0
+[Unreleased]: https://github.com/ericklindberg/shipyard/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ericklindberg/shipyard/releases/tag/v0.3.0
+
+Versions 0.1.0 and 0.2.0 were pre-public development snapshots. The sanitized public history does not contain tags for those versions.

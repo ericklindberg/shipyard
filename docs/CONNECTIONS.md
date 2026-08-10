@@ -20,7 +20,7 @@ Default location:
 ${SHIPYARD_CONFIG_DIR:-${XDG_CONFIG_HOME:-~/.config}/shipyard}/connections.json
 ```
 
-Connection creation is offline. `connection check` is also offline unless `--allow-network` is supplied. Network checks are read-only and never call an adapter's mutation method. HTTP profiles use only the official Render, Heroku, and Vercel API hosts; custom API-base overrides, environment-configured HTTP proxies, and cross-host redirects are rejected or disabled so authorization headers cannot be rerouted to another service. Credential references must use the corresponding provider prefix (`RENDER_`, `HEROKU_`, or `VERCEL_`) to prevent cross-provider ambient-secret confusion.
+Connection creation is offline. `connection check` is also offline unless `--allow-network` is supplied. Network checks are read-only and never call an adapter's mutation method. HTTP profiles use only the official GitHub.com, Render, Heroku, and Vercel API hosts; custom API-base overrides, environment-configured HTTP proxies, and cross-host redirects are rejected or disabled so authorization headers cannot be rerouted to another service. Credential references must use the corresponding provider prefix (`GITHUB_`, `RENDER_`, `HEROKU_`, or `VERCEL_`) to prevent cross-provider ambient-secret confusion.
 
 ## Quick start
 
@@ -75,6 +75,47 @@ shipyard connection check github-production --repo . --allow-network --json
 ```
 
 The read-only check first proves the name resolves through local Git configuration, then runs exact-ref `git ls-remote`; a same-named filesystem path is not accepted as a profile remote. The mutation adapter can only push the candidate's full SHA to the canonical configured ref.
+
+### GitHub Actions workflow
+
+The `github-actions` provider controls a workflow dispatch on GitHub.com. It does not store a token, clone a repository, or treat a successful HTTP request as release success. The profile binds both the human-readable repository/workflow names and GitHub's stable numeric IDs.
+
+Your workflow must accept Shipyard's required `workflow_dispatch` inputs:
+
+- `shipyard_candidate_sha` — the exact approved 40-character source SHA;
+- `shipyard_run_id` — the local ledger correlation ID.
+
+Copy [`examples/github-actions/release.yml`](../examples/github-actions/release.yml) into your repository as a safe starting contract. Its first job proves the workflow event resolved to the approved SHA and performs no release mutation.
+
+Discover the stable IDs without putting a token on argv:
+
+```bash
+gh api repos/OWNER/REPOSITORY --jq .id
+gh api repos/OWNER/REPOSITORY/actions/workflows/release.yml --jq .id
+```
+
+Supply a fine-grained token through your secret manager with repository metadata/content read access and Actions write access, then create and check the local profile:
+
+```bash
+export GITHUB_ACTIONS_TOKEN='from your secret manager'
+shipyard connection add mobile-release \
+  --provider github-actions \
+  --owner OWNER \
+  --repo-name REPOSITORY \
+  --repository-id NUMERIC_REPOSITORY_ID \
+  --workflow-id NUMERIC_WORKFLOW_ID \
+  --workflow-file release.yml \
+  --ref 'refs/tags/shipyard-candidate-{source_sha}' \
+  --token-env GITHUB_ACTIONS_TOKEN
+shipyard connection check mobile-release --allow-network --json
+shipyard connection playbook mobile-release --output shipyard.toml --json
+```
+
+`{source_sha}` is expanded only when an approved run executes. GitHub's dispatch API accepts a branch or tag name, not a raw commit ID, so Shipyard rejects branch refs and requires a unique candidate tag whose name ends in the approved SHA. Configure a GitHub ruleset that prevents updates and deletion for `shipyard-candidate-*`; tag naming alone is not server-side immutability.
+
+The expanded tag must already resolve to the local candidate SHA. Before mutation, Shipyard rechecks the repository ID, workflow ID/path/state, and tag resolution. It then dispatches with GitHub REST API version `2026-03-10`, records the returned workflow-run ID, and reads the run back. A queued or in-progress run remains unresolved until `shipyard resolve RUN_ID` observes a terminal result. A run succeeds only when GitHub reports the same repository, workflow, event, and source SHA with a successful conclusion.
+
+GitHub Enterprise Server and older GitHub API versions are intentionally unsupported because their dispatch endpoint may not return a durable run ID. Shipyard will not substitute a heuristic “latest run” lookup after mutation.
 
 For a Buzz-hosted Git repository, use the same exact-SHA adapter with a separately configured named remote:
 

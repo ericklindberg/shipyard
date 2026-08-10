@@ -46,6 +46,7 @@ Failures and uncertain outcomes are not retried automatically.
 | Provider path | Automated contract | Sandbox evidence on 2026-08-09 | Release claim |
 |---|---|---|---|
 | Git/GitHub named remote | Unit, integration, and exact-ref readback | Passed against a disposable local bare Git remote, including one exact-SHA mutation and readback | Implementation verified; live GitHub account contract still operator-dependent |
+| GitHub Actions | Fake HTTPS transport verifies stable repository/workflow identity, exact ref-to-SHA fencing, durable dispatch run ID, and run readback | Read-only identity check passed against the public Shipyard repository and active release-evidence workflow; no mutation performed | Beta; exact-SHA non-mutating dispatch is verified separately during release dogfood |
 | Buzz-hosted Git | Same `git.ref` contract | Covered by named-remote Git path; no live Buzz-hosted repository target configured | Beta |
 | Buzz workflow | Fake runner verifies `workflows get`; execute/readback contract covered | No sandbox workflow profile or `BUZZ_PRIVATE_KEY` available | Beta; live validation required |
 | Render | Fake HTTPS transport, exact service identity, mutation/readback contract | No sandbox service profile or credential reference available | Beta; live validation required |

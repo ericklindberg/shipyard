@@ -246,6 +246,16 @@ def _connection_options(args: argparse.Namespace) -> dict[str, object]:
             "remote": args.remote or "origin",
             "ref": args.ref or "refs/heads/main",
         }
+    if provider == "github-actions":
+        return {
+            "owner": args.owner,
+            "repo": args.repo_name,
+            "repository_id": args.repository_id,
+            "workflow_id": args.workflow_id,
+            "workflow_file": args.workflow_file,
+            "ref": args.ref or "refs/tags/shipyard-candidate-{source_sha}",
+            "token_env": args.token_env or "GITHUB_ACTIONS_TOKEN",
+        }
     if provider == "buzz":
         return {"workflow_id": args.workflow_id}
     if provider == "render":
@@ -272,6 +282,11 @@ def _connection_options(args: argparse.Namespace) -> dict[str, object]:
 def _template(provider: str) -> str:
     headers = {
         "github": ("github", "owner/repository:refs/heads/main", "git.ref"),
+        "github-actions": (
+            "github-actions",
+            "github-actions:repository-id:workflow-id:refs/tags/shipyard-candidate-{source_sha}",
+            "github.workflow",
+        ),
         "buzz": ("buzz", "repository:refs/heads/main", "git.ref"),
         "render": ("render", "owner/service/production", "render.deploy"),
         "heroku": ("heroku", "app/production", "heroku.build"),
@@ -280,6 +295,12 @@ def _template(provider: str) -> str:
     selected, destination, action = headers[provider]
     configs = {
         "github": 'remote = "origin"\nref = "refs/heads/main"',
+        "github-actions": (
+            'owner = "change-me"\nrepo = "change-me"\nrepository_id = "1234"\n'
+            'workflow_id = "5678"\nworkflow_file = "release.yml"\n'
+            'ref = "refs/tags/shipyard-candidate-{source_sha}"\n'
+            'token_env = "GITHUB_ACTIONS_TOKEN"'
+        ),
         "buzz": 'remote = "buzz"\nref = "refs/heads/main"',
         "render": 'service_id = "srv-change-me"\ntoken_env = "RENDER_API_KEY"',
         "heroku": (
@@ -383,11 +404,23 @@ def _build_parser() -> argparse.ArgumentParser:
     connection_add.add_argument(
         "--provider",
         required=True,
-        choices=["github", "buzz-git", "buzz", "render", "heroku", "vercel"],
+        choices=[
+            "github",
+            "github-actions",
+            "buzz-git",
+            "buzz",
+            "render",
+            "heroku",
+            "vercel",
+        ],
     )
     connection_add.add_argument("--remote")
     connection_add.add_argument("--ref")
     connection_add.add_argument("--workflow-id")
+    connection_add.add_argument("--workflow-file")
+    connection_add.add_argument("--owner")
+    connection_add.add_argument("--repo-name")
+    connection_add.add_argument("--repository-id")
     connection_add.add_argument("--service-id")
     connection_add.add_argument("--app")
     connection_add.add_argument("--project")
@@ -429,7 +462,10 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--json", action="store_true")
 
     init_parser = subparsers.add_parser("init", help="Create a typed provider playbook")
-    init_parser.add_argument("provider", choices=["github", "buzz", "render", "heroku", "vercel"])
+    init_parser.add_argument(
+        "provider",
+        choices=["github", "github-actions", "buzz", "render", "heroku", "vercel"],
+    )
     init_parser.add_argument("--output", default="shipyard.toml")
     init_parser.add_argument("--force", action="store_true")
     init_parser.add_argument("--json", action="store_true")

@@ -21,8 +21,8 @@ Shipyard releases are exact-SHA evidence exercises. CI never deploys providers o
 6. Create a detached, clean worktree at that SHA and repeat all gates there.
 7. Build the wheel and source archive only from that detached worktree.
 8. Install the exact wheel in a fresh virtual environment with `pip --no-index` and run the onboarding smoke.
-9. Generate `dist/shipyard-0.3.0.cdx.json` and `dist/SHA256SUMS` with the locked tools and repository scripts.
-10. Verify the checksum file names exactly the expected wheel, source archive, and SBOM.
+9. Generate `dist/shipyard-0.3.0-runtime.cdx.json`, `dist/shipyard-0.3.0-build.cdx.json`, and `dist/SHA256SUMS` with the locked tools and repository scripts.
+10. Verify the checksum file names exactly the expected wheel, source archive, runtime SBOM, and build-environment SBOM.
 
 ## Buzz-first promotion
 
@@ -42,7 +42,7 @@ The `Release evidence` workflow is manual and requires a full 40-character `cand
 
 - checks out and independently verifies that exact SHA;
 - reruns formatting, typing, security, test, dependency, secret, and build gates;
-- generates the reproducible CycloneDX SBOM and deterministic SHA-256 file;
+- generates separate reproducible runtime and build-environment CycloneDX SBOMs plus a deterministic SHA-256 file;
 - creates GitHub artifact attestations using OIDC; and
 - uploads the evidence bundle without publishing it to a package registry.
 

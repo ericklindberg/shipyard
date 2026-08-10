@@ -102,6 +102,7 @@ shipyard adapters --json
 Schema version 2 is the production path. It forbids raw external argv and routes external operations through allowlisted adapters:
 
 - `git.ref` — exact-SHA Git ref update with `ls-remote` readback; suitable for GitHub and Buzz Git remotes;
+- `github.workflow` — exact-SHA GitHub Actions dispatch with durable run-ID and workflow-run readback;
 - `buzz.workflow` — workflow trigger with run/input readback;
 - `render.deploy` — exact commit deployment and deploy readback;
 - `heroku.build` — source-blob build with version readback;
@@ -110,6 +111,14 @@ Schema version 2 is the production path. It forbids raw external argv and routes
 Use `shipyard connection add`, `check`, and `playbook` for reusable per-user onboarding, or `shipyard init PROVIDER` to generate an unconfigured provider example. Connection profiles and playbooks store environment-variable names, never values. See [Per-user service connections](docs/CONNECTIONS.md).
 
 Legacy schema version 1 remains available for reviewed local commands. Raw external execution is disabled by default and requires `SHIPYARD_ENABLE_LEGACY_EXTERNAL=1`; it is not recommended for production.
+
+## GitHub Actions as an evidence-producing runner
+
+Shipyard does not replace GitHub Actions. It makes a reviewed GitHub workflow one typed step in an exact-candidate release. Before dispatch, Shipyard expands `{source_sha}` in the configured candidate-tag template, rejects mutable branch refs, verifies the canonical repository ID and active workflow ID/path, and proves the resulting tag resolves to the approved SHA. GitHub's durable workflow-run ID is saved before semantic readback verifies the same repository, workflow, event, and `head_sha`. Protect the candidate-tag namespace against update and deletion on the GitHub mirror; tag naming alone cannot provide server-side immutability.
+
+Start with the non-mutating contract in [`examples/github-actions/release.yml`](examples/github-actions/release.yml). Shipyard extends that contract in [its active dogfood workflow](.github/workflows/shipyard-contract.yml) with the complete locked test, static-analysis, security, dependency-audit, build, SBOM, checksum, and artifact gate. Both declare the two inputs Shipyard sends and reject a workflow event whose `GITHUB_SHA` differs from the approved candidate. Add your own build, signing, TestFlight, package, or infrastructure jobs after the identity gate, using pinned actions and provider-native protections.
+
+This is the practical boundary: GitHub remains the build/CI environment; Shipyard controls which exact source may enter a release workflow and records what GitHub says happened. Shipyard does not yet prove App Store Connect/TestFlight adoption; that requires a future artifact-to-store identity adapter rather than trusting a green GitHub run alone.
 
 ## State model
 
