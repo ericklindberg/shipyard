@@ -156,6 +156,49 @@ def test_xcode_cloud_readback_maps_official_status_and_exact_source(
     assert result.observed_sha == commit_sha
 
 
+def test_xcode_cloud_readback_resolves_live_asc_related_relationships(monkeypatch):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    payload: dict[str, object] = {
+        "data": {
+            "type": "ciBuildRuns",
+            "id": "build-run-9",
+            "attributes": {
+                "executionProgress": "COMPLETE",
+                "completionStatus": "SUCCEEDED",
+                "sourceCommit": {"commitSha": "a" * 40},
+            },
+            "relationships": {
+                "workflow": {
+                    "data": None,
+                    "links": {
+                        "related": "https://api.appstoreconnect.apple.com/v1/ciBuildRuns/build-run-9/workflow"
+                    },
+                },
+                "sourceBranchOrTag": {
+                    "data": None,
+                    "links": {
+                        "related": "https://api.appstoreconnect.apple.com/v1/ciBuildRuns/build-run-9/sourceBranchOrTag"
+                    },
+                },
+            },
+        }
+    }
+    transport = FakeTransport(
+        [
+            HttpResponse(200, payload),
+            _resource("ciWorkflows", "workflow-1"),
+            _resource("scmGitReferences", "gitref-1"),
+        ]
+    )
+    receipt = MutationReceipt("apple", "xcodecloud.build", "build-run-9", "a" * 40, {})
+
+    result = XcodeCloudBuildAdapter(transport).readback(_context(), receipt)
+
+    assert result.status == "succeeded"
+    assert result.observed_sha == "a" * 40
+    assert [call["method"] for call in transport.calls] == ["GET", "GET", "GET"]
+
+
 def test_xcode_cloud_readback_fails_on_provider_relationship_drift(monkeypatch):
     monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
     payload = {
@@ -179,6 +222,25 @@ def test_xcode_cloud_readback_fails_on_provider_relationship_drift(monkeypatch):
     receipt = MutationReceipt("apple", "xcodecloud.build", "build-run-9", "a" * 40, {})
 
     assert XcodeCloudBuildAdapter(transport).readback(_context(), receipt).status == "failed"
+
+
+def test_xcode_cloud_readback_rejects_mismatched_receipt_without_network(monkeypatch):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    transport = FakeTransport([])
+    adapter = XcodeCloudBuildAdapter(transport, source_resolver=lambda *_: "a" * 40)
+    receipt = MutationReceipt(
+        "wrong-provider",
+        "xcodecloud.build",
+        "build-run-9",
+        "a" * 40,
+        {},
+    )
+
+    result = adapter.readback(_context(), receipt)
+
+    assert result.status == "failed"
+    assert result.observed_sha is None
+    assert transport.calls == []
 
 
 def test_xcode_cloud_refuses_post_when_remote_candidate_tag_does_not_match_source(
@@ -335,6 +397,114 @@ def _testflight_identity_responses():
             },
         ),
     ]
+
+
+def _testflight_link_only_identity_responses():
+    responses = _testflight_identity_responses()
+    build = responses[1].payload["data"]
+    run = responses[3].payload["data"]
+    group = responses[4].payload["data"]
+    assert isinstance(build, dict)
+    assert isinstance(run, dict)
+    assert isinstance(group, dict)
+    build["relationships"] = {
+        "app": {
+            "data": None,
+            "links": {
+                "related": "https://api.appstoreconnect.apple.com/v1/builds/build-1/app"
+            },
+        },
+        "preReleaseVersion": {
+            "data": None,
+            "links": {
+                "related": "https://api.appstoreconnect.apple.com/v1/builds/build-1/preReleaseVersion"
+            },
+        },
+    }
+    run["relationships"] = {
+        "builds": {
+            "data": None,
+            "links": {
+                "related": "https://api.appstoreconnect.apple.com/v1/ciBuildRuns/build-run-9/builds"
+            },
+        }
+    }
+    group["relationships"] = {
+        "app": {
+            "data": None,
+            "links": {
+                "related": "https://api.appstoreconnect.apple.com/v1/betaGroups/group-1/app"
+            },
+        }
+    }
+    return [
+        responses[0],
+        responses[1],
+        _resource("apps", "app-1"),
+        _resource("preReleaseVersions", "version-1"),
+        responses[2],
+        responses[3],
+        HttpResponse(200, {"data": [{"type": "builds", "id": "build-1"}]}),
+        responses[4],
+        _resource("apps", "app-1"),
+    ]
+
+
+def test_testflight_check_resolves_live_asc_related_relationships(monkeypatch):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    transport = FakeTransport(_testflight_link_only_identity_responses())
+
+    check = AppleTestFlightGroupAdapter(transport).check(_testflight_context())
+
+    assert check.status == "verified"
+    assert check.identity == "app-1:build-1:group-1"
+    assert all(call["method"] == "GET" for call in transport.calls)
+    related_urls = [
+        call["url"]
+        for call in transport.calls
+        if isinstance(call["url"], str) and "/builds/build-1/" in call["url"]
+    ]
+    assert related_urls == [
+        "https://api.appstoreconnect.apple.com/v1/builds/build-1/app",
+        "https://api.appstoreconnect.apple.com/v1/builds/build-1/preReleaseVersion",
+    ]
+
+
+def test_testflight_check_rejects_malformed_non_null_inline_relationship(monkeypatch):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    responses = _testflight_link_only_identity_responses()
+    build = responses[1].payload["data"]
+    assert isinstance(build, dict)
+    relationships = build["relationships"]
+    assert isinstance(relationships, dict)
+    app_relationship = relationships["app"]
+    assert isinstance(app_relationship, dict)
+    app_relationship["data"] = {"type": "wrong", "id": "app-1"}
+    transport = FakeTransport(responses)
+
+    with pytest.raises(AdapterError, match="malformed relationship data"):
+        AppleTestFlightGroupAdapter(transport).check(_testflight_context())
+
+    assert all(call["method"] == "GET" for call in transport.calls)
+
+
+@pytest.mark.parametrize("malformed_entry", ["invalid", {"data": []}])
+def test_testflight_check_rejects_malformed_relationship_container(
+    monkeypatch, malformed_entry
+):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    responses = _testflight_link_only_identity_responses()
+    build = responses[1].payload["data"]
+    assert isinstance(build, dict)
+    relationships = build["relationships"]
+    assert isinstance(relationships, dict)
+    relationships["app"] = malformed_entry
+    transport = FakeTransport(responses)
+
+    with pytest.raises(AdapterError, match="malformed relationship data"):
+        AppleTestFlightGroupAdapter(transport).check(_testflight_context())
+
+    assert all(call["method"] == "GET" for call in transport.calls)
 
 
 def test_testflight_check_binds_app_build_version_xcode_source_and_group(monkeypatch):

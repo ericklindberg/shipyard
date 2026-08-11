@@ -97,7 +97,38 @@ class GitRefAdapter:
             raise AdapterError("git.ref requires a canonical refs/heads/* or refs/tags/* ref")
         if not _EXACT_SHA.fullmatch(context.source_sha):
             raise AdapterError("git.ref requires a full 40-character source SHA")
+        self._tag_kind(context, ref)
         return remote, ref, repo
+
+    @staticmethod
+    def _tag_kind(context: AdapterContext, ref: str) -> str:
+        value = context.config.get("tag_kind", "lightweight")
+        if not isinstance(value, str) or value not in {"lightweight", "annotated"}:
+            raise AdapterError("git.ref tag_kind must be lightweight or annotated")
+        if value == "annotated" and (
+            context.provider != "github"
+            or ref != f"refs/tags/shipyard-candidate-{context.source_sha}"
+        ):
+            raise AdapterError(
+                "git.ref annotated mode requires an exact GitHub annotated candidate tag"
+            )
+        return value
+
+    @staticmethod
+    def _remote_refs(output: str) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for line in output.splitlines():
+            if "\t" not in line:
+                continue
+            fields = line.split("\t")
+            if (
+                len(fields) != 2
+                or _EXACT_SHA.fullmatch(fields[0]) is None
+                or fields[1] in result
+            ):
+                raise AdapterError("Git remote verification returned malformed identity")
+            result[fields[1]] = fields[0]
+        return result
 
     @contextmanager
     def _buzz_command_prefix(
@@ -170,6 +201,7 @@ class GitRefAdapter:
 
     def check(self, context: AdapterContext) -> ConnectionCheck:
         remote, ref, repo = self._parameters(context)
+        tag_kind = self._tag_kind(context, ref)
         with self._git_command_prefix(context, remote, repo) as command:
             if context.provider != "buzz-git":
                 remote_code, _remote_output = self.runner(
@@ -182,30 +214,164 @@ class GitRefAdapter:
                         "git connection verification requires a configured named remote"
                     )
             code, output = self.runner(
-                (*command, "ls-remote", remote, ref), repo, self._allowed_env(context)
+                (
+                    *command,
+                    "ls-remote",
+                    remote,
+                    ref,
+                    *([f"{ref}^{{}}"] if tag_kind == "annotated" else []),
+                ),
+                repo,
+                self._allowed_env(context),
             )
         if code != 0:
             raise AdapterError("Git remote verification failed")
-        observed = None
-        for line in output.splitlines():
-            fields = line.split()
-            if len(fields) == 2 and fields[1] == ref and _EXACT_SHA.fullmatch(fields[0]):
-                observed = fields[0]
-                break
+        refs = self._remote_refs(output)
+        observed = refs.get(ref)
+        if tag_kind == "annotated":
+            peeled = refs.get(f"{ref}^{{}}")
+            if observed is None and peeled is None:
+                return ConnectionCheck(
+                    "verified",
+                    context.provider,
+                    self.action,
+                    ref,
+                    {
+                        "remote": remote,
+                        "ref": ref,
+                        "tag_kind": tag_kind,
+                        "ref_exists": False,
+                    },
+                )
+            if observed is None or peeled != context.source_sha or observed == peeled:
+                raise AdapterError(
+                    "Git remote candidate tag is not an exact annotated source tag"
+                )
+            return ConnectionCheck(
+                "verified",
+                context.provider,
+                self.action,
+                peeled,
+                {
+                    "remote": remote,
+                    "ref": ref,
+                    "tag_kind": tag_kind,
+                    "tag_object_sha": observed,
+                    "ref_exists": True,
+                },
+            )
         if observed is None:
-            raise AdapterError("Git remote verification did not return the configured ref")
+            return ConnectionCheck(
+                "verified",
+                context.provider,
+                self.action,
+                ref,
+                {
+                    "remote": remote,
+                    "ref": ref,
+                    "tag_kind": tag_kind,
+                    "ref_exists": False,
+                },
+            )
         return ConnectionCheck(
-            "verified", context.provider, self.action, observed, {"remote": remote, "ref": ref}
+            "verified",
+            context.provider,
+            self.action,
+            observed,
+            {"remote": remote, "ref": ref, "tag_kind": tag_kind, "ref_exists": True},
         )
 
     def execute(self, context: AdapterContext) -> MutationReceipt:
         remote, ref, repo = self._parameters(context)
-        with self._git_command_prefix(context, remote, repo) as command:
-            code, _output = self.runner(
-                (*command, "push", "--porcelain", remote, f"{context.source_sha}:{ref}"),
-                repo,
-                self._allowed_env(context),
-            )
+        tag_kind = self._tag_kind(context, ref)
+        tag_object_sha: str | None = None
+        code = 0
+        if tag_kind == "annotated":
+            check = self.check(context)
+            existing = check.evidence.get("ref_exists")
+            existing_object = check.evidence.get("tag_object_sha")
+            if existing is True:
+                if not isinstance(existing_object, str):
+                    raise AdapterError("annotated candidate tag preflight omitted object identity")
+                tag_object_sha = existing_object
+            else:
+                remote_code, remote_output = self.runner(
+                    ("git", "remote", "get-url", "--all", remote), repo, ()
+                )
+                remote_urls = [line for line in remote_output.splitlines() if line]
+                if remote_code != 0 or len(remote_urls) != 1:
+                    raise AdapterError(
+                        "annotated candidate tag requires exactly one configured remote URL"
+                    )
+                with TemporaryDirectory(prefix="shipyard-annotated-tag-") as temporary:
+                    clone = Path(temporary) / "repository"
+                    commands = [
+                        (
+                            "git",
+                            "clone",
+                            "--local",
+                            "--no-hardlinks",
+                            "--no-checkout",
+                            "--",
+                            str(repo),
+                            str(clone),
+                        ),
+                        ("git", "remote", "remove", "origin"),
+                        ("git", "remote", "add", remote, remote_urls[0]),
+                        (
+                            "git",
+                            "-c",
+                            "user.name=Shipyard Release",
+                            "-c",
+                            "user.email=release@shipyard.invalid",
+                            "-c",
+                            "tag.gpgSign=false",
+                            "tag",
+                            "--annotate",
+                            "--message",
+                            f"Shipyard candidate {context.source_sha}",
+                            ref.removeprefix("refs/tags/"),
+                            context.source_sha,
+                        ),
+                    ]
+                    for index, command_parts in enumerate(commands):
+                        cwd = repo if index == 0 else clone
+                        code, _output = self.runner(command_parts, cwd, ())
+                        if code != 0:
+                            raise AdapterError(
+                                "isolated annotated candidate tag preparation failed"
+                            )
+                    code, output = self.runner(
+                        ("git", "rev-parse", ref, f"{ref}^{{}}"), clone, ()
+                    )
+                    identities = output.splitlines()
+                    if (
+                        code != 0
+                        or len(identities) != 2
+                        or _EXACT_SHA.fullmatch(identities[0]) is None
+                        or identities[1] != context.source_sha
+                        or identities[0] == identities[1]
+                    ):
+                        raise AdapterError(
+                            "isolated annotated candidate tag identity is invalid"
+                        )
+                    tag_object_sha = identities[0]
+                    code, _output = self.runner(
+                        ("git", "push", "--porcelain", remote, f"{ref}:{ref}"),
+                        clone,
+                        (),
+                    )
+                if code != 0:
+                    raise AdapterError(
+                        "annotated candidate tag push failed; provider outcome requires readback"
+                    )
+        else:
+            with self._git_command_prefix(context, remote, repo) as command:
+                code, _output = self.runner(
+                    (*command, "push", "--porcelain", remote, f"{context.source_sha}:{ref}"),
+                    repo,
+                    self._allowed_env(context),
+                )
         if code != 0:
             raise AdapterError("exact-ref git push failed; provider outcome requires readback")
         operation_id = _operation_id("git", remote, ref, context.source_sha)
@@ -214,31 +380,89 @@ class GitRefAdapter:
             action=self.action,
             operation_id=operation_id,
             submitted_sha=context.source_sha,
-            evidence={"remote": remote, "ref": ref},
+            evidence={
+                "remote": remote,
+                "ref": ref,
+                "tag_kind": tag_kind,
+                **({"tag_object_sha": tag_object_sha} if tag_object_sha is not None else {}),
+            },
         )
 
     def readback(
         self, context: AdapterContext, receipt: MutationReceipt
     ) -> ProviderReadback:
         remote, ref, repo = self._parameters(context)
+        tag_kind = self._tag_kind(context, ref)
+        expected_operation = _operation_id("git", remote, ref, context.source_sha)
+        receipt_kind = receipt.evidence.get("tag_kind")
+        expected_object = receipt.evidence.get("tag_object_sha")
+        if (
+            receipt.provider != context.provider
+            or receipt.action != self.action
+            or receipt.operation_id != expected_operation
+            or receipt.submitted_sha != context.source_sha
+            or receipt.evidence.get("remote", remote) != remote
+            or receipt.evidence.get("ref", ref) != ref
+            or (
+                receipt_kind is not None
+                and (not isinstance(receipt_kind, str) or receipt_kind != tag_kind)
+            )
+            or (
+                tag_kind == "annotated"
+                and (
+                    not isinstance(expected_object, str)
+                    or _EXACT_SHA.fullmatch(expected_object) is None
+                )
+            )
+        ):
+            return ProviderReadback(
+                "failed", receipt.operation_id, None, {"identity_match": False}
+            )
         with self._git_command_prefix(context, remote, repo) as command:
             code, output = self.runner(
-                (*command, "ls-remote", remote, ref), repo, self._allowed_env(context)
+                (
+                    *command,
+                    "ls-remote",
+                    remote,
+                    ref,
+                    *([f"{ref}^{{}}"] if tag_kind == "annotated" else []),
+                ),
+                repo,
+                self._allowed_env(context),
             )
         if code != 0:
             return ProviderReadback("unknown", receipt.operation_id, None, {"ref": ref})
-        observed = None
-        for line in output.splitlines():
-            fields = line.split()
-            if len(fields) == 2 and fields[1] == ref and _EXACT_SHA.fullmatch(fields[0]):
-                observed = fields[0]
-                break
-        status = "succeeded" if observed == receipt.submitted_sha else "failed"
+        try:
+            refs = self._remote_refs(output)
+        except AdapterError:
+            return ProviderReadback("failed", receipt.operation_id, None, {"ref": ref})
+        tag_object_sha = refs.get(ref)
+        observed = (
+            refs.get(f"{ref}^{{}}") if tag_kind == "annotated" else tag_object_sha
+        )
+        object_matches = (
+            tag_kind != "annotated"
+            or (
+                isinstance(expected_object, str)
+                and tag_object_sha == expected_object
+                and tag_object_sha != observed
+            )
+        )
+        status = (
+            "succeeded"
+            if observed == receipt.submitted_sha and object_matches
+            else "failed"
+        )
         return ProviderReadback(
             status,
             receipt.operation_id,
             observed,
-            {"remote": remote, "ref": ref},
+            {
+                "remote": remote,
+                "ref": ref,
+                "tag_kind": tag_kind,
+                **({"tag_object_sha": tag_object_sha} if tag_object_sha is not None else {}),
+            },
         )
 
 

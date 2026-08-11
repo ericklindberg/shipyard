@@ -103,6 +103,23 @@ Shipyard does not yet authenticate a separate candidate-preparer principal. Do n
 2. Apple `canonicalName` equals `refs/tags/shipyard-candidate-<source_sha>`;
 3. `git ls-remote` on the governed checkout's named remote resolves that tag, including annotated-tag peeling, to the approved SHA.
 
+Create the candidate reference as a separately approved `git.ref` run. For GitHub-backed Xcode Cloud repositories, request an annotated candidate tag so Apple can index the SCM reference:
+
+```toml
+[[steps]]
+id = "candidate-tag"
+name = "Publish annotated Xcode candidate tag"
+effect = "external"
+action = "git.ref"
+
+[steps.config]
+remote = "origin"
+ref = "refs/tags/shipyard-candidate-0123456789abcdef0123456789abcdef01234567"
+tag_kind = "annotated"
+```
+
+Annotated mode is accepted only for the exact `shipyard-candidate-<source_sha>` GitHub tag. Shipyard creates the tag object in a disposable writable clone of the frozen execution snapshot, performs one non-forced push, and readbacks both the tag-object SHA and peeled approved commit. It does not modify the governed checkout.
+
 Example step configuration:
 
 ```toml
@@ -124,7 +141,7 @@ The run receipt stores the Apple build-run ID. Readback requires Apple `sourceCo
 
 ### TestFlight
 
-`appstoreconnect.testflight` binds the exact app, bundle ID, build, marketing version, build number, Xcode Cloud run, source SHA, and beta group. It performs one build/group relationship mutation and drains only bounded Apple-hosted relationship pagination before declaring adoption.
+`appstoreconnect.testflight` binds the exact app, bundle ID, build, marketing version, build number, Xcode Cloud run, source SHA, and beta group. Apple may omit inline relationship data from live resources; Shipyard resolves those identities through canonical official related-resource endpoints and bounded Apple-hosted pagination before mutation. It performs one build/group relationship mutation and drains only bounded Apple-hosted relationship pagination before declaring adoption.
 
 Keep Xcode Cloud and TestFlight as separately approved runs when they have different destination locks. Do not use the adapters with production credentials until disposable live validation confirms current App Store Connect resource semantics.
 

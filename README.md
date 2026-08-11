@@ -24,12 +24,12 @@ If any bound evidence changes, the approval becomes invalid. Ambiguous external 
 Python 3.11+ on a POSIX host is required. Install the current signed release wheel directly from GitHub:
 
 ```bash
-uv tool install https://github.com/ericklindberg/shipyard/releases/download/v0.5.1/shipyard_release-0.5.1-py3-none-any.whl
+uv tool install https://github.com/ericklindberg/shipyard/releases/download/v0.5.2/shipyard_release-0.5.2-py3-none-any.whl
 shipyard version --json
 shipyard doctor /path/to/repository --json
 ```
 
-For provenance-sensitive environments, download the wheel and `SHA256SUMS` from the [v0.5.1 release](https://github.com/ericklindberg/shipyard/releases/tag/v0.5.1), verify the checksum, and verify GitHub's artifact attestation before installation. Shipyard's own release workflow never publishes or deploys automatically.
+For provenance-sensitive environments, download the wheel and `SHA256SUMS` from the [v0.5.2 release](https://github.com/ericklindberg/shipyard/releases/tag/v0.5.2), verify the checksum, and verify GitHub's artifact attestation before installation. Shipyard's own release workflow never publishes or deploys automatically.
 
 For development from a source checkout:
 

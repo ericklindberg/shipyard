@@ -10,7 +10,8 @@ from .apple import (
     _ENV_NAME,
     _RESOURCE_ID,
     _config_string,
-    _relationship_id,
+    _relationship_id_or_related,
+    _relationship_ids_or_related,
     _resource_data,
 )
 from .base import AdapterContext, AdapterError, ConnectionCheck, MutationReceipt, ProviderReadback
@@ -32,26 +33,6 @@ class _Coordinates:
     @property
     def identity(self) -> str:
         return f"{self.app_id}:{self.build_id}:{self.beta_group_id}"
-
-
-def _relationship_ids(
-    resource: dict[str, object], name: str, expected_type: str
-) -> set[str] | None:
-    relationships = resource.get("relationships")
-    relationship = relationships.get(name) if isinstance(relationships, dict) else None
-    data = relationship.get("data") if isinstance(relationship, dict) else None
-    if not isinstance(data, list):
-        return None
-    result: set[str] = set()
-    for item in data:
-        if (
-            not isinstance(item, dict)
-            or item.get("type") != expected_type
-            or not isinstance(item.get("id"), str)
-        ):
-            return None
-        result.add(item["id"])
-    return result
 
 
 class TestFlightGroupAdapter:
@@ -172,9 +153,31 @@ class TestFlightGroupAdapter:
             or not isinstance(build_attributes, dict)
             or build_attributes.get("version") != coordinates.build_number
             or build_attributes.get("processingState") != "VALID"
-            or _relationship_id(build, "app", "apps") != coordinates.app_id
-            or _relationship_id(build, "preReleaseVersion", "preReleaseVersions")
-            != coordinates.pre_release_version_id
+        ):
+            raise AdapterError("App Store Connect build identity is not valid")
+        build_app_id = _relationship_id_or_related(
+            self.transport,
+            headers,
+            build,
+            parent_type="builds",
+            parent_id=coordinates.build_id,
+            relationship="app",
+            expected_type="apps",
+            operation="App Store Connect build app relationship verification",
+        )
+        build_version_id = _relationship_id_or_related(
+            self.transport,
+            headers,
+            build,
+            parent_type="builds",
+            parent_id=coordinates.build_id,
+            relationship="preReleaseVersion",
+            expected_type="preReleaseVersions",
+            operation="App Store Connect build version relationship verification",
+        )
+        if (
+            build_app_id != coordinates.app_id
+            or build_version_id != coordinates.pre_release_version_id
         ):
             raise AdapterError("App Store Connect build identity is not valid")
 
@@ -206,14 +209,25 @@ class TestFlightGroupAdapter:
             if isinstance(run_attributes, dict)
             else None
         )
-        linked_builds = _relationship_ids(build_run, "builds", "builds")
         if (
             build_run.get("type") != "ciBuildRuns"
             or not isinstance(source_commit, dict)
             or source_commit.get("commitSha") != context.source_sha
-            or linked_builds is None
-            or coordinates.build_id not in linked_builds
         ):
+            raise AdapterError(
+                "Xcode Cloud build does not bind the App Store build to the approved source SHA"
+            )
+        linked_builds = _relationship_ids_or_related(
+            self.transport,
+            headers,
+            build_run,
+            parent_type="ciBuildRuns",
+            parent_id=coordinates.xcode_cloud_run_id,
+            relationship="builds",
+            expected_type="builds",
+            operation="Xcode Cloud build relationship verification",
+        )
+        if coordinates.build_id not in linked_builds:
             raise AdapterError(
                 "Xcode Cloud build does not bind the App Store build to the approved source SHA"
             )
@@ -225,11 +239,21 @@ class TestFlightGroupAdapter:
             coordinates.beta_group_id,
             "TestFlight beta group verification",
         )
-        group_app_id = _relationship_id(group, "app", "apps")
-        if (
-            group.get("type") != "betaGroups"
-            or group_app_id != coordinates.app_id
-        ):
+        if group.get("type") != "betaGroups":
+            raise AdapterError(
+                "TestFlight beta group does not belong to the configured app"
+            )
+        group_app_id = _relationship_id_or_related(
+            self.transport,
+            headers,
+            group,
+            parent_type="betaGroups",
+            parent_id=coordinates.beta_group_id,
+            relationship="app",
+            expected_type="apps",
+            operation="TestFlight beta group app relationship verification",
+        )
+        if group_app_id != coordinates.app_id:
             raise AdapterError(
                 "TestFlight beta group does not belong to the configured app"
             )

@@ -99,6 +99,41 @@ def test_git_ref_adapter_connection_check_is_read_only(tmp_path):
     ]
 
 
+def test_git_ref_adapter_ignores_non_identity_remote_diagnostics(tmp_path):
+    def runner(command, cwd, allowed_env):
+        if command[1:4] == ("remote", "get-url", "--"):
+            return 0, "ssh://git@example.test/repository.git\n"
+        return 0, f"Warning: synthetic SSH diagnostic\n{SHA}\trefs/heads/main\n"
+
+    result = GitRefAdapter(runner=runner).check(
+        context(
+            "github",
+            {"remote": "origin", "ref": "refs/heads/main", "repo_path": str(tmp_path)},
+        )
+    )
+
+    assert result.status == "verified"
+    assert result.identity == SHA
+
+
+def test_git_ref_adapter_allows_absent_destination_after_remote_verification(tmp_path):
+    def runner(command, cwd, allowed_env):
+        if command[1:4] == ("remote", "get-url", "--"):
+            return 0, "ssh://git@example.test/repository.git\n"
+        return 0, ""
+
+    result = GitRefAdapter(runner=runner).check(
+        context(
+            "github",
+            {"remote": "origin", "ref": "refs/heads/new", "repo_path": str(tmp_path)},
+        )
+    )
+
+    assert result.status == "verified"
+    assert result.identity == "refs/heads/new"
+    assert result.evidence["ref_exists"] is False
+
+
 def test_git_ref_adapter_check_rejects_missing_named_remote(tmp_path):
     commands = []
 
@@ -630,6 +665,130 @@ def test_git_ref_adapter_pushes_only_exact_sha_and_reads_back(tmp_path):
     assert readback.observed_sha == SHA
 
 
+def test_git_ref_readback_rejects_mismatched_receipt_without_remote_access(tmp_path):
+    commands = []
+
+    def runner(command, cwd, allowed_env):
+        commands.append((command, cwd, allowed_env))
+        return 0, ""
+
+    adapter = GitRefAdapter(runner=runner)
+    adapter_context = context(
+        "github",
+        {"remote": "origin", "ref": "refs/heads/main", "repo_path": str(tmp_path)},
+    )
+    receipt = MutationReceipt("wrong", "git.ref", "git-invalid", SHA, {})
+
+    result = adapter.readback(adapter_context, receipt)
+
+    assert result.status == "failed"
+    assert result.observed_sha is None
+    assert commands == []
+
+
+def test_git_ref_readback_rejects_unhashable_receipt_metadata_without_remote_access(
+    tmp_path,
+):
+    commands = []
+
+    def runner(command, cwd, allowed_env):
+        commands.append((command, cwd, allowed_env))
+        return 0, ""
+
+    adapter = GitRefAdapter(runner=runner)
+    adapter_context = context(
+        "github",
+        {"remote": "origin", "ref": "refs/heads/main", "repo_path": str(tmp_path)},
+    )
+    valid_receipt = adapter.execute(adapter_context)
+    commands.clear()
+    malformed = MutationReceipt(
+        valid_receipt.provider,
+        valid_receipt.action,
+        valid_receipt.operation_id,
+        valid_receipt.submitted_sha,
+        {"remote": "origin", "ref": "refs/heads/main", "tag_kind": []},
+    )
+
+    result = adapter.readback(adapter_context, malformed)
+
+    assert result.status == "failed"
+    assert result.observed_sha is None
+    assert commands == []
+
+
+def test_git_ref_adapter_pushes_annotated_candidate_tag_and_reads_back_peeled_sha(
+    git_repo, tmp_path
+):
+    source_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)], cwd=git_repo, check=True
+    )
+    ref = f"refs/tags/shipyard-candidate-{source_sha}"
+    ctx = AdapterContext(
+        "run-1",
+        source_sha,
+        "github",
+        "production",
+        {
+            "remote": "origin",
+            "ref": ref,
+            "repo_path": str(git_repo),
+            "tag_kind": "annotated",
+        },
+    )
+    adapter = GitRefAdapter()
+
+    check = adapter.check(ctx)
+    receipt = adapter.execute(ctx)
+    readback = adapter.readback(ctx, receipt)
+    remote_refs = subprocess.run(
+        ["git", "ls-remote", "origin", ref, f"{ref}^{{}}"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    assert check.status == "verified"
+    assert check.evidence["ref_exists"] is False
+    assert receipt.evidence["tag_kind"] == "annotated"
+    assert receipt.evidence["tag_object_sha"] != source_sha
+    assert f"{receipt.evidence['tag_object_sha']}\t{ref}\n" in remote_refs
+    assert f"{source_sha}\t{ref}^{{}}\n" in remote_refs
+    assert readback.status == "succeeded"
+    assert readback.observed_sha == source_sha
+    assert readback.evidence["tag_object_sha"] == receipt.evidence["tag_object_sha"]
+    assert not (git_repo / ".git" / "refs" / "tags" / ref.removeprefix("refs/tags/")).exists()
+
+
+@pytest.mark.parametrize("ref", ["refs/heads/main", "refs/tags/release"])
+def test_git_ref_adapter_rejects_annotated_mode_outside_exact_candidate_tag(
+    tmp_path, ref
+):
+    adapter = GitRefAdapter(runner=lambda *_args: (0, ""))
+    ctx = context(
+        "github",
+        {
+            "remote": "origin",
+            "ref": ref,
+            "repo_path": str(tmp_path),
+            "tag_kind": "annotated",
+        },
+    )
+
+    with pytest.raises(AdapterError, match="annotated candidate tag"):
+        adapter.check(ctx)
+
+
 @pytest.mark.parametrize("bad_ref", ["main", "refs/heads/main..evil", "refs/heads/main/"])
 def test_git_ref_adapter_rejects_noncanonical_refs(tmp_path, bad_ref):
     adapter = GitRefAdapter(runner=lambda *_args: (0, ""))
@@ -797,23 +956,73 @@ class SequenceAdapter:
     def __init__(self):
         self.readbacks = ["pending", "succeeded"]
 
-    def execute(self, adapter_context):
+    def check(self, context: AdapterContext) -> ConnectionCheck:
+        return ConnectionCheck(
+            "verified", "render", self.action, "srv-1", {"read_only": True}
+        )
+
+    def execute(self, context: AdapterContext) -> MutationReceipt:
         return MutationReceipt(
             "render",
             self.action,
             "dep-1",
-            adapter_context.source_sha,
+            context.source_sha,
             {"service_id": "srv-1"},
         )
 
-    def readback(self, adapter_context, receipt):
+    def readback(
+        self, context: AdapterContext, receipt: MutationReceipt
+    ) -> ProviderReadback:
         status = self.readbacks.pop(0)
         return ProviderReadback(
             status,
             receipt.operation_id,
-            adapter_context.source_sha if status == "succeeded" else None,
+            context.source_sha if status == "succeeded" else None,
             {"provider_status": "live" if status == "succeeded" else "build"},
         )
+
+
+class RejectingCheckAdapter(SequenceAdapter):
+    def __init__(self):
+        super().__init__()
+        self.execute_calls = 0
+
+    def check(self, context: AdapterContext) -> ConnectionCheck:
+        raise AdapterError("synthetic read-only identity failure")
+
+    def execute(self, context: AdapterContext) -> MutationReceipt:
+        self.execute_calls += 1
+        return super().execute(context)
+
+
+def test_external_adapter_check_failure_never_crosses_mutation_boundary(
+    git_repo, tmp_path
+):
+    ledger = Ledger(tmp_path / "state")
+    adapter = RejectingCheckAdapter()
+    executor = ReleaseExecutor(ledger, AdapterRegistry([adapter]))
+    prepared = executor.start(git_repo, load_playbook(typed_playbook(tmp_path)))
+
+    failed = executor.resume(
+        prepared.run_id,
+        execute_external=True,
+        confirm_sha=prepared.source_sha,
+        approve_candidate=prepared.candidate_digest,
+        approval_actor="pytest-reviewer",
+        approval_reason="preflight boundary regression",
+    )
+
+    event_types = [
+        event["event_type"] for event in ledger.list_audit_events(prepared.run_id)
+    ]
+    assert failed.status == "failed"
+    assert failed.steps[0].status == "failed"
+    assert failed.steps[0].attempts == 1
+    assert adapter.execute_calls == 0
+    assert ledger.get_adapter_receipt(prepared.run_id, 0) is None
+    assert "adapter.check_failed" in event_types
+    assert "adapter.mutation_started" not in event_types
+    assert "adapter.uncertain" not in event_types
 
 
 class SnapshotProbeAdapter(SequenceAdapter):
@@ -826,18 +1035,18 @@ class SnapshotProbeAdapter(SequenceAdapter):
         self.artifact_mode: int | None = None
         self.config_mode: int | None = None
 
-    def check(self, adapter_context: AdapterContext) -> ConnectionCheck:
+    def check(self, context: AdapterContext) -> ConnectionCheck:
         return ConnectionCheck(
             "verified",
             "render",
             self.action,
             "srv-1",
-            {"source": adapter_context.source_sha},
+            {"source": context.source_sha},
         )
 
-    def execute(self, adapter_context: AdapterContext) -> MutationReceipt:
+    def execute(self, context: AdapterContext) -> MutationReceipt:
         (self.original_repo / "release.bin").write_bytes(b"tampered-after-authorization")
-        configured = adapter_context.config["repo_path"]
+        configured = context.config["repo_path"]
         assert isinstance(configured, str)
         self.execution_repo = Path(configured)
         self.observed_artifact = (self.execution_repo / "release.bin").read_bytes()
@@ -845,7 +1054,7 @@ class SnapshotProbeAdapter(SequenceAdapter):
         self.config_mode = (
             self.execution_repo / ".git" / "config"
         ).stat().st_mode & 0o777
-        return super().execute(adapter_context)
+        return super().execute(context)
 
 
 def test_external_adapter_executes_from_approved_immutable_snapshot(git_repo, tmp_path):
@@ -1019,8 +1228,8 @@ class ReceiptAuditFailureAdapter(SequenceAdapter):
         self.ledger = ledger
         self.readbacks = ["succeeded"]
 
-    def execute(self, adapter_context):
-        receipt = super().execute(adapter_context)
+    def execute(self, context: AdapterContext) -> MutationReceipt:
+        receipt = super().execute(context)
         with sqlite3.connect(self.ledger.database_path) as connection:
             connection.execute(
                 """
@@ -1191,6 +1400,8 @@ def test_github_workflow_run_persists_exact_provider_receipt_and_readback(
     }
     fake = FakeHttp(
         [
+            HttpResponse(200, repository),
+            HttpResponse(200, workflow),
             HttpResponse(200, repository),
             HttpResponse(200, workflow),
             HttpResponse(200, {"sha": source_sha}),

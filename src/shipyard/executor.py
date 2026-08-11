@@ -563,6 +563,38 @@ class ReleaseExecutor:
         if step.action is None:
             raise RuntimeError("adapter execution requires an action")
         self.ledger.begin_step(run.run_id, step.ordinal)
+        adapter = self.adapters.get(step.action)
+        context = self._adapter_context(run, step)
+        try:
+            check = adapter.check(context)
+            if (
+                check.status != "verified"
+                or check.provider != context.provider
+                or check.action != step.action
+                or not isinstance(check.identity, str)
+                or not check.identity
+            ):
+                raise AdapterError("adapter preflight identity is not verified")
+        except AdapterError as exc:
+            message = redact(str(exc))
+            self.ledger.append_audit_event(
+                run.run_id,
+                "adapter.check_failed",
+                {"ordinal": step.ordinal, "action": step.action, "message": message},
+            )
+            digest = hashlib.sha256(message.encode()).hexdigest()
+            return "failed", 1, digest, message[-4000:]
+        self.ledger.append_audit_event(
+            run.run_id,
+            "adapter.check_verified",
+            {
+                "ordinal": step.ordinal,
+                "action": step.action,
+                "identity": check.identity,
+                "candidate_digest": run.candidate_digest,
+                "source_sha": run.source.sha,
+            },
+        )
         self.ledger.append_audit_event(
             run.run_id,
             "adapter.mutation_started",
@@ -573,8 +605,6 @@ class ReleaseExecutor:
                 "source_sha": run.source.sha,
             },
         )
-        adapter = self.adapters.get(step.action)
-        context = self._adapter_context(run, step)
         try:
             receipt = adapter.execute(context)
             self.ledger.record_adapter_receipt(run.run_id, step.ordinal, receipt)

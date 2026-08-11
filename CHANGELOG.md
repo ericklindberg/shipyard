@@ -4,6 +4,23 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-08-11
+
+### Added
+
+- `git.ref` can create exact-SHA GitHub candidate tags as annotated tags from a disposable writable clone of the frozen execution snapshot, preserving both tag-object and peeled-commit identities in provider evidence.
+
+### Fixed
+
+- App Store Connect adapters now resolve omitted inline relationships through canonical Apple related-resource endpoints with strict resource typing and bounded Apple-hosted pagination.
+- Typed adapter execution now records and validates the read-only `check()` result before crossing `adapter.mutation_started`; preflight identity failures are terminal failures with no mutation receipt instead of false uncertain outcomes.
+- Xcode Cloud readback resolves live `workflow` and `sourceBranchOrTag` relationships when Apple returns relationship links with null inline data.
+
+### Security
+
+- Annotated candidate-tag mode is restricted to `refs/tags/shipyard-candidate-<exact-source-sha>` on the GitHub provider, never force-pushes, leaves the governed checkout untouched, and requires readback of both the original tag object and peeled approved commit.
+- Malformed non-null Apple relationship data fails closed instead of falling back to another provider representation.
+
 ## [0.5.1] - 2026-08-11
 
 ### Fixed

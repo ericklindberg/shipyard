@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from ..runtime import resolve_executable, sanitized_environment
 from .base import (
@@ -42,18 +42,123 @@ def _resource_data(response: HttpResponse, operation: str) -> dict[str, object]:
     return data
 
 
-def _relationship_id(resource: dict[str, object], name: str, expected_type: str) -> str | None:
+def _relationship_id_or_related(
+    transport: HttpTransport,
+    headers: dict[str, str],
+    resource: dict[str, object],
+    *,
+    parent_type: str,
+    parent_id: str,
+    relationship: str,
+    expected_type: str,
+    operation: str,
+) -> str:
     relationships = resource.get("relationships")
-    if not isinstance(relationships, dict):
-        return None
-    relationship = relationships.get(name)
-    if not isinstance(relationship, dict):
-        return None
-    data = relationship.get("data")
-    if not isinstance(data, dict) or data.get("type") != expected_type:
-        return None
-    identifier = data.get("id")
-    return identifier if isinstance(identifier, str) else None
+    if relationships is not None and not isinstance(relationships, dict):
+        raise AdapterError(f"{operation} returned malformed relationship data")
+    entry = relationships.get(relationship) if isinstance(relationships, dict) else None
+    if entry is not None and not isinstance(entry, dict):
+        raise AdapterError(f"{operation} returned malformed relationship data")
+    data = entry.get("data") if isinstance(entry, dict) else None
+    if data is not None:
+        if not isinstance(data, dict) or data.get("type") != expected_type:
+            raise AdapterError(f"{operation} returned malformed relationship data")
+        identifier = data.get("id")
+        if not isinstance(identifier, str):
+            raise AdapterError(f"{operation} returned malformed relationship data")
+        return identifier
+    response = transport.request(
+        "GET",
+        f"{_APPLE_API}/v1/{quote(parent_type, safe='')}/{quote(parent_id, safe='')}"
+        f"/{quote(relationship, safe='')}",
+        headers=headers,
+    )
+    related = _resource_data(response, operation)
+    identifier = related.get("id")
+    if related.get("type") != expected_type or not isinstance(identifier, str):
+        raise AdapterError(f"{operation} returned malformed relationship data")
+    return identifier
+
+
+def _relationship_ids_or_related(
+    transport: HttpTransport,
+    headers: dict[str, str],
+    resource: dict[str, object],
+    *,
+    parent_type: str,
+    parent_id: str,
+    relationship: str,
+    expected_type: str,
+    operation: str,
+    max_pages: int = 20,
+) -> set[str]:
+    relationships = resource.get("relationships")
+    if relationships is not None and not isinstance(relationships, dict):
+        raise AdapterError(f"{operation} returned malformed relationship data")
+    entry = relationships.get(relationship) if isinstance(relationships, dict) else None
+    if entry is not None and not isinstance(entry, dict):
+        raise AdapterError(f"{operation} returned malformed relationship data")
+    data = entry.get("data") if isinstance(entry, dict) else None
+    if isinstance(data, list):
+        result: set[str] = set()
+        for item in data:
+            if (
+                not isinstance(item, dict)
+                or item.get("type") != expected_type
+                or not isinstance(item.get("id"), str)
+            ):
+                raise AdapterError(f"{operation} returned malformed relationship data")
+            result.add(item["id"])
+        return result
+    if data is not None:
+        raise AdapterError(f"{operation} returned malformed relationship data")
+
+    expected_path = (
+        f"/v1/{quote(parent_type, safe='')}/{quote(parent_id, safe='')}"
+        f"/{quote(relationship, safe='')}"
+    )
+    url = f"{_APPLE_API}{expected_path}"
+    seen: set[str] = set()
+    result = set()
+    for _page in range(max_pages):
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "api.appstoreconnect.apple.com"
+            or parsed.path != expected_path
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or url in seen
+        ):
+            raise AdapterError(f"{operation} pagination URL is invalid")
+        seen.add(url)
+        response = transport.request("GET", url, headers=headers)
+        if not 200 <= response.status < 300:
+            raise AdapterError(f"{operation} failed with status {response.status}")
+        page_data = response.payload.get("data")
+        if not isinstance(page_data, list):
+            raise AdapterError(f"{operation} returned malformed relationship data")
+        for item in page_data:
+            if (
+                not isinstance(item, dict)
+                or item.get("type") != expected_type
+                or not isinstance(item.get("id"), str)
+            ):
+                raise AdapterError(f"{operation} returned malformed relationship data")
+            result.add(item["id"])
+        links = response.payload.get("links")
+        if links is None:
+            return result
+        if not isinstance(links, dict):
+            raise AdapterError(f"{operation} pagination is malformed")
+        next_url = links.get("next")
+        if next_url is None:
+            return result
+        if not isinstance(next_url, str) or not next_url:
+            raise AdapterError(f"{operation} pagination is malformed")
+        url = next_url
+    raise AdapterError(f"{operation} pagination exceeded the page limit")
 
 
 @dataclass(frozen=True)
@@ -304,6 +409,15 @@ class XcodeCloudBuildAdapter:
         self, context: AdapterContext, receipt: MutationReceipt
     ) -> ProviderReadback:
         coordinates = self._coordinates(context)
+        if (
+            receipt.provider != context.provider
+            or receipt.action != self.action
+            or receipt.submitted_sha != context.source_sha
+            or _RESOURCE_ID.fullmatch(receipt.operation_id) is None
+        ):
+            return ProviderReadback(
+                "failed", receipt.operation_id, None, {"identity_match": False}
+            )
         headers = self._headers(coordinates)
         response = self.transport.request(
             "GET",
@@ -316,17 +430,38 @@ class XcodeCloudBuildAdapter:
         observed_sha = (
             source_commit.get("commitSha") if isinstance(source_commit, dict) else None
         )
-        workflow_id = _relationship_id(resource, "workflow", "ciWorkflows")
-        git_reference_id = _relationship_id(
-            resource, "sourceBranchOrTag", "scmGitReferences"
+        if (
+            resource.get("type") != "ciBuildRuns"
+            or resource.get("id") != receipt.operation_id
+        ):
+            return ProviderReadback(
+                "failed",
+                receipt.operation_id,
+                observed_sha if isinstance(observed_sha, str) else None,
+                {"identity_match": False},
+            )
+        workflow_id = _relationship_id_or_related(
+            self.transport,
+            headers,
+            resource,
+            parent_type="ciBuildRuns",
+            parent_id=receipt.operation_id,
+            relationship="workflow",
+            expected_type="ciWorkflows",
+            operation="Xcode Cloud workflow relationship readback",
+        )
+        git_reference_id = _relationship_id_or_related(
+            self.transport,
+            headers,
+            resource,
+            parent_type="ciBuildRuns",
+            parent_id=receipt.operation_id,
+            relationship="sourceBranchOrTag",
+            expected_type="scmGitReferences",
+            operation="Xcode Cloud Git reference relationship readback",
         )
         identity_matches = (
-            receipt.provider == context.provider
-            and receipt.action == self.action
-            and receipt.submitted_sha == context.source_sha
-            and resource.get("type") == "ciBuildRuns"
-            and resource.get("id") == receipt.operation_id
-            and workflow_id == coordinates.workflow_id
+            workflow_id == coordinates.workflow_id
             and git_reference_id == coordinates.git_reference_id
         )
         progress = attributes.get("executionProgress") if isinstance(attributes, dict) else None

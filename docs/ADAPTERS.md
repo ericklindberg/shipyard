@@ -14,7 +14,7 @@ A receipt is never sufficient evidence of success. The executor marks a step suc
 
 | Action | Provider use | Immutable input | Semantic readback |
 |---|---|---|---|
-| `git.ref` | GitHub, Buzz Git, other Git servers | full Git SHA + canonical ref | exact `ls-remote` ref SHA |
+| `git.ref` | GitHub, Buzz Git, other Git servers | full Git SHA + canonical ref; optional exact annotated GitHub candidate tag | exact ref SHA, plus annotated tag-object and peeled-commit identity |
 | `github.workflow` | GitHub Actions on GitHub.com | full Git SHA + canonical repository/workflow IDs + SHA-suffixed candidate tag | durable run ID, exact repository/workflow/event/head SHA, status and conclusion |
 | `buzz.workflow` | Buzz workflows | candidate source SHA input | matching workflow run and input |
 | `render.deploy` | Render services | commit ID | deploy status and commit ID |
