@@ -12,6 +12,8 @@ from shipyard.approvals import (
     build_approval_statement,
     build_candidate_review,
     canonical_packet_bytes,
+    load_candidate_review,
+    load_signed_approval,
     sign_approval_ssh,
     verify_signed_approval_ssh,
 )
@@ -201,5 +203,61 @@ def test_ssh_approval_rejects_mismatched_review(git_repo, tmp_path):
     key, allowed = _ssh_identity(tmp_path)
     signed = sign_approval_ssh(statement, key_path=key)
 
-    with pytest.raises(ApprovalPacketError, match="review"):
+    with pytest.raises(ApprovalPacketError, match="does not match"):
         verify_signed_approval_ssh(signed, review=second, allowed_signers=allowed)
+
+
+def test_approval_packet_loaders_reject_symlinks_and_parse_regular_files(
+    git_repo, tmp_path
+):
+    review = build_candidate_review(_prepared_run(git_repo, tmp_path))
+    statement = build_approval_statement(
+        review,
+        actor="alice@example.com",
+        reason="reviewed exact candidate",
+        approved_at="2026-08-11T00:00:00Z",
+    )
+    key, allowed = _ssh_identity(tmp_path)
+    signed = sign_approval_ssh(statement, key_path=key)
+    review_path = tmp_path / "review.json"
+    signed_path = tmp_path / "signed.json"
+    review_path.write_text(json.dumps(review), encoding="utf-8")
+    signed_path.write_text(json.dumps(signed), encoding="utf-8")
+
+    assert load_candidate_review(review_path) == review
+    assert load_signed_approval(signed_path) == signed
+
+    review_link = tmp_path / "review-link.json"
+    review_link.symlink_to(review_path)
+    with pytest.raises(ApprovalPacketError, match="regular file"):
+        load_candidate_review(review_link)
+
+
+def test_ledger_records_verified_signed_approval_time_and_provenance_atomically(
+    git_repo, tmp_path
+):
+    run = _prepared_run(git_repo, tmp_path)
+    ledger = Ledger(tmp_path / "state")
+    approved_at = "2026-08-11T00:00:00Z"
+    provenance = {
+        "kind": "ssh",
+        "review_sha256": "b" * 64,
+        "signed_approval_sha256": "c" * 64,
+        "principal": "alice@example.com",
+    }
+
+    ledger.record_approval(
+        run.run_id,
+        str(run.candidate_digest),
+        actor="alice@example.com",
+        reason="reviewed exact candidate",
+        approved_at=approved_at,
+        provenance=provenance,
+    )
+
+    approval = ledger.get_approval(run.run_id)
+    assert approval is not None
+    assert approval["approved_at"] == approved_at
+    events = ledger.list_audit_events(run.run_id)
+    assert events[-1]["event_type"] == "candidate.signed_approval_imported"
+    assert events[-1]["payload"] == provenance

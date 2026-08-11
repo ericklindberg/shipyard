@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -13,6 +14,16 @@ from typing import Any
 
 from .adapters.base import AdapterError
 from .adapters.registry import AdapterRegistry
+from .approvals import (
+    ApprovalPacketError,
+    build_approval_statement,
+    build_candidate_review,
+    canonical_packet_bytes,
+    load_candidate_review,
+    load_signed_approval,
+    sign_approval_ssh,
+    verify_signed_approval_ssh,
+)
 from .bootstrap import BootstrapBundle, BootstrapInputError, plan_github_bootstrap
 from .candidate import CandidateError
 from .connections import (
@@ -452,6 +463,48 @@ def _build_parser() -> argparse.ArgumentParser:
     github_bootstrap.add_argument("--output-dir", required=True)
     github_bootstrap.add_argument("--json", action="store_true")
 
+    approval_parser = subparsers.add_parser(
+        "approval", help="Export, sign, verify, or import portable candidate approvals"
+    )
+    approval_subparsers = approval_parser.add_subparsers(
+        dest="approval_command", required=True
+    )
+    approval_export = approval_subparsers.add_parser(
+        "export", help="Export the current ledger-bound candidate review"
+    )
+    approval_export.add_argument("run_id")
+    approval_export.add_argument("--state-dir", default=str(_default_state_dir()))
+    approval_export.add_argument("--output", required=True)
+    approval_export.add_argument("--force", action="store_true")
+    approval_export.add_argument("--json", action="store_true")
+    approval_sign = approval_subparsers.add_parser(
+        "sign", help="Sign one candidate review with an operator-owned SSH key"
+    )
+    approval_sign.add_argument("review")
+    approval_sign.add_argument("--key", required=True)
+    approval_sign.add_argument("--actor", required=True)
+    approval_sign.add_argument("--reason", required=True)
+    approval_sign.add_argument("--approved-at", required=True)
+    approval_sign.add_argument("--output", required=True)
+    approval_sign.add_argument("--force", action="store_true")
+    approval_sign.add_argument("--json", action="store_true")
+    approval_verify = approval_subparsers.add_parser(
+        "verify", help="Verify a signed approval against a candidate review"
+    )
+    approval_verify.add_argument("review")
+    approval_verify.add_argument("signed")
+    approval_verify.add_argument("--allowed-signers", required=True)
+    approval_verify.add_argument("--json", action="store_true")
+    approval_import = approval_subparsers.add_parser(
+        "import", help="Verify and record a signed approval for the current ledger candidate"
+    )
+    approval_import.add_argument("run_id")
+    approval_import.add_argument("--state-dir", default=str(_default_state_dir()))
+    approval_import.add_argument("--review", required=True)
+    approval_import.add_argument("--signed", required=True)
+    approval_import.add_argument("--allowed-signers", required=True)
+    approval_import.add_argument("--json", action="store_true")
+
     connection_parser = subparsers.add_parser(
         "connection", help="Manage private per-user provider connections"
     )
@@ -672,6 +725,103 @@ def main(argv: list[str] | None = None) -> int:
                 },
                 as_json=args.json,
             )
+            return 0
+        if args.command == "approval":
+            operation = args.approval_command
+            if operation == "export":
+                ledger = Ledger(args.state_dir)
+                review = build_candidate_review(ledger.get_run(args.run_id))
+                destination = _write_private_text(
+                    args.output,
+                    canonical_packet_bytes(review).decode("utf-8") + "\n",
+                    force=args.force,
+                )
+                payload = {
+                    "run_id": args.run_id,
+                    "candidate_digest": review["candidate_digest"],
+                    "output": str(destination),
+                }
+                if args.json:
+                    _print(payload, as_json=True)
+                else:
+                    print(f"Candidate review: {destination}")
+                return 0
+            review = load_candidate_review(args.review)
+            if operation == "sign":
+                statement = build_approval_statement(
+                    review,
+                    actor=args.actor,
+                    reason=args.reason,
+                    approved_at=args.approved_at,
+                )
+                signed = sign_approval_ssh(statement, key_path=args.key)
+                destination = _write_private_text(
+                    args.output,
+                    json.dumps(signed, separators=(",", ":"), sort_keys=True) + "\n",
+                    force=args.force,
+                )
+                _print(
+                    {
+                        "output": str(destination),
+                        "actor": statement["actor"],
+                        "candidate_digest": statement["candidate_digest"],
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            signed = load_signed_approval(args.signed)
+            if operation == "verify":
+                statement = verify_signed_approval_ssh(
+                    signed,
+                    review=review,
+                    allowed_signers=args.allowed_signers,
+                )
+                _print(
+                    {"verified": True, "statement": statement}, as_json=args.json
+                )
+                return 0
+            ledger = Ledger(args.state_dir)
+            if ledger.get_approval(args.run_id) is not None:
+                raise ApprovalPacketError("run already has a recorded approval")
+            current_review = build_candidate_review(ledger.get_run(args.run_id))
+            if canonical_packet_bytes(review) != canonical_packet_bytes(current_review):
+                raise ApprovalPacketError(
+                    "supplied review does not match the current ledger candidate"
+                )
+            statement = verify_signed_approval_ssh(
+                signed,
+                review=current_review,
+                allowed_signers=args.allowed_signers,
+            )
+            signed_digest = hashlib.sha256(
+                json.dumps(signed, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            ledger.record_approval(
+                args.run_id,
+                statement["candidate_digest"],
+                actor=statement["actor"],
+                reason=statement["reason"],
+                approved_at=statement["approved_at"],
+                provenance={
+                    "kind": "ssh",
+                    "review_sha256": statement["review_sha256"],
+                    "signed_approval_sha256": signed_digest,
+                    "principal": statement["actor"],
+                },
+            )
+            approval_payload = {
+                "run_id": args.run_id,
+                "candidate_digest": statement["candidate_digest"],
+                "actor": statement["actor"],
+                "approved_at": statement["approved_at"],
+                "signature_verified": True,
+            }
+            if args.json:
+                _print(approval_payload, as_json=True)
+            else:
+                print(f"Signed approval imported for run {args.run_id}")
+                print(f"Actor: {statement['actor']}")
+                print(f"Approved at: {statement['approved_at']}")
             return 0
         if args.command == "connection":
             store = ConnectionStore(args.config_dir)
@@ -899,6 +1049,7 @@ def main(argv: list[str] | None = None) -> int:
         return 4
     except (
         AdapterError,
+        ApprovalPacketError,
         AuthorizationError,
         CandidateError,
         BootstrapInputError,

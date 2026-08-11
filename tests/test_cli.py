@@ -271,3 +271,137 @@ def test_wait_cli_uses_readback_once_without_resolve(monkeypatch, tmp_path, caps
     payload = json_data(capsys.readouterr().out)
     assert payload["state"] == "succeeded"
     assert payload["polls"] == 2
+
+
+def test_signed_approval_cli_round_trip_binds_current_ledger_candidate(
+    git_repo, tmp_path
+):
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)], cwd=git_repo, check=True
+    )
+    playbook = tmp_path / "approval.toml"
+    playbook.write_text(
+        '''schema_version = 2
+name = "signed-approval"
+target = "sandbox"
+provider = "github"
+destination = "sandbox:refs/heads/release"
+
+[[steps]]
+id = "publish"
+name = "Publish"
+effect = "external"
+action = "git.ref"
+
+[steps.config]
+remote = "origin"
+ref = "refs/heads/release"
+''',
+        encoding="utf-8",
+    )
+    state = tmp_path / "state"
+    prepared = run_cli(
+        [
+            "run",
+            str(git_repo),
+            "--playbook",
+            str(playbook),
+            "--state-dir",
+            str(state),
+            "--json",
+        ],
+        cwd=git_repo,
+    )
+    prepared_payload = json_data(prepared.stdout)
+    review = tmp_path / "review.json"
+    signed = tmp_path / "signed.json"
+    key = tmp_path / "approval-key"
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
+        check=True,
+    )
+    public_key = key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    allowed = tmp_path / "allowed-signers"
+    allowed.write_text(f"alice@example.com {public_key}\n", encoding="utf-8")
+
+    exported = run_cli(
+        [
+            "approval",
+            "export",
+            prepared_payload["run_id"],
+            "--state-dir",
+            str(state),
+            "--output",
+            str(review),
+            "--json",
+        ],
+        cwd=git_repo,
+    )
+    assert exported.returncode == 0, exported.stderr
+    signed_result = run_cli(
+        [
+            "approval",
+            "sign",
+            str(review),
+            "--key",
+            str(key),
+            "--actor",
+            "alice@example.com",
+            "--reason",
+            "reviewed exact candidate",
+            "--approved-at",
+            "2026-08-11T00:00:00Z",
+            "--output",
+            str(signed),
+            "--json",
+        ],
+        cwd=git_repo,
+    )
+    assert signed_result.returncode == 0, signed_result.stderr
+    verified = run_cli(
+        [
+            "approval",
+            "verify",
+            str(review),
+            str(signed),
+            "--allowed-signers",
+            str(allowed),
+            "--json",
+        ],
+        cwd=git_repo,
+    )
+    assert verified.returncode == 0, verified.stderr
+    imported = run_cli(
+        [
+            "approval",
+            "import",
+            prepared_payload["run_id"],
+            "--state-dir",
+            str(state),
+            "--review",
+            str(review),
+            "--signed",
+            str(signed),
+            "--allowed-signers",
+            str(allowed),
+            "--json",
+        ],
+        cwd=git_repo,
+    )
+    assert imported.returncode == 0, imported.stderr
+
+    status = run_cli(
+        [
+            "status",
+            prepared_payload["run_id"],
+            "--state-dir",
+            str(state),
+            "--json",
+        ],
+        cwd=git_repo,
+    )
+    approval = json_data(status.stdout)["approval"]
+    assert approval["actor"] == "alice@example.com"
+    assert approval["approved_at"] == "2026-08-11T00:00:00Z"

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from datetime import UTC, datetime
@@ -165,6 +166,51 @@ def _validate_approval_statement(statement: dict[str, Any]) -> None:
 def canonical_approval_bytes(statement: dict[str, Any]) -> bytes:
     _validate_approval_statement(statement)
     return _canonical_json(statement)
+
+
+def _load_json_object(path: str | Path, label: str) -> dict[str, Any]:
+    source = Path(path).expanduser()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(source, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
+            raise ApprovalPacketError(f"{label} must be a bounded regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            encoded = handle.read(1024 * 1024 + 1)
+    except (OSError, ValueError) as exc:
+        raise ApprovalPacketError(f"{label} must be a bounded regular file") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(encoded) > 1024 * 1024:
+        raise ApprovalPacketError(f"{label} must be a bounded regular file")
+    try:
+        payload = json.loads(encoded.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApprovalPacketError(f"{label} must contain valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ApprovalPacketError(f"{label} must contain a JSON object")
+    return payload
+
+
+def load_candidate_review(path: str | Path) -> dict[str, object]:
+    payload = _load_json_object(path, "candidate review")
+    _validate_review(payload)
+    return payload
+
+
+def load_signed_approval(path: str | Path) -> dict[str, Any]:
+    payload = _load_json_object(path, "signed approval")
+    if payload.get("api_version") != "shipyard.signed-approval/v1":
+        raise ApprovalPacketError("signed approval api_version is invalid")
+    statement = payload.get("statement")
+    signature = payload.get("signature")
+    if not isinstance(statement, dict) or not isinstance(signature, dict):
+        raise ApprovalPacketError("signed approval statement and signature are required")
+    canonical_approval_bytes(statement)
+    return payload
 
 
 def _regular_path(value: str | Path, label: str) -> Path:

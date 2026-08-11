@@ -620,9 +620,42 @@ class Ledger:
         *,
         actor: str,
         reason: str,
+        approved_at: str | None = None,
+        provenance: dict[str, object] | None = None,
     ) -> None:
         if not actor.strip() or not reason.strip():
             raise LedgerError("approval actor and reason are required")
+        approval_timestamp = _now()
+        if approved_at is not None:
+            try:
+                parsed = datetime.strptime(approved_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=UTC
+                )
+            except ValueError as exc:
+                raise LedgerError("signed approval time must be canonical UTC") from exc
+            if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != approved_at:
+                raise LedgerError("signed approval time must be canonical UTC")
+            approval_timestamp = approved_at
+        if provenance is not None:
+            expected_keys = {
+                "kind",
+                "review_sha256",
+                "signed_approval_sha256",
+                "principal",
+            }
+            if set(provenance) != expected_keys or provenance.get("kind") != "ssh":
+                raise LedgerError("signed approval provenance is malformed")
+            for digest_key in ("review_sha256", "signed_approval_sha256"):
+                digest = provenance.get(digest_key)
+                if (
+                    not isinstance(digest, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                ):
+                    raise LedgerError("signed approval provenance digest is malformed")
+            if provenance.get("principal") != actor.strip():
+                raise LedgerError(
+                    "signed approval provenance principal does not match actor"
+                )
         with self._governed_transaction() as connection:
             row = connection.execute(
                 "SELECT candidate_digest FROM runs WHERE run_id = ?", (run_id,)
@@ -642,7 +675,13 @@ class Ledger:
                     reason = excluded.reason,
                     approved_at = excluded.approved_at
                 """,
-                (run_id, candidate_digest, actor.strip(), reason.strip(), _now()),
+                (
+                    run_id,
+                    candidate_digest,
+                    actor.strip(),
+                    reason.strip(),
+                    approval_timestamp,
+                ),
             )
             connection.execute(
                 """
@@ -662,6 +701,13 @@ class Ledger:
                     "reason": reason.strip(),
                 },
             )
+            if provenance is not None:
+                self._insert_audit_event(
+                    connection,
+                    run_id,
+                    "candidate.signed_approval_imported",
+                    provenance,
+                )
 
     def get_approval(self, run_id: str) -> dict[str, str] | None:
         with self._connect() as connection:
