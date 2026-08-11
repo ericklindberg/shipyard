@@ -15,6 +15,7 @@ from typing import Any
 from .adapters.base import AdapterContext, AdapterError, ProviderReadback
 from .adapters.registry import AdapterRegistry
 from .candidate import build_candidate
+from .connections import inspect_buzz_git_auth
 from .execution_snapshot import (
     ExecutionSnapshotError,
     execution_snapshot_run,
@@ -432,6 +433,15 @@ class ReleaseExecutor:
                         dispatch_run = prepare_execution_snapshot(
                             self.ledger.state_dir, current_run, revalidated
                         )
+                        if current_run.provider == "buzz-git":
+                            remote = step.config.get("remote")
+                            if not isinstance(remote, str):
+                                raise ProvenanceDriftError("Buzz Git remote is malformed")
+                            readiness = inspect_buzz_git_auth(dispatch_run.repo_path, remote)
+                            if not bool(readiness["ready"]):
+                                raise ProvenanceDriftError(
+                                    "Buzz Git authentication readiness changed before execution"
+                                )
                         snapshot_candidate = build_candidate(dispatch_run)
                         if snapshot_candidate.digest != current_run.candidate_digest:
                             raise ProvenanceDriftError(

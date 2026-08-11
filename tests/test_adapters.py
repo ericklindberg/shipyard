@@ -116,6 +116,33 @@ def test_git_ref_adapter_check_rejects_missing_named_remote(tmp_path):
     assert commands == [("git", "remote", "get-url", "--", "origin")]
 
 
+def test_buzz_git_ref_forwards_only_nostr_private_key_reference(tmp_path):
+    calls = []
+
+    def runner(command, cwd, allowed_env):
+        calls.append((command, allowed_env))
+        return 0, f"{SHA}\trefs/heads/main\n"
+
+    result = GitRefAdapter(runner=runner).check(
+        context(
+            "buzz-git",
+            {"remote": "buzz", "ref": "refs/heads/main", "repo_path": str(tmp_path)},
+        )
+    )
+
+    assert result.status == "verified"
+    assert calls == [
+        (
+            ("git", "remote", "get-url", "--", "buzz"),
+            ("NOSTR_PRIVATE_KEY", "BUZZ_AUTH_TAG"),
+        ),
+        (
+            ("git", "ls-remote", "buzz", "refs/heads/main"),
+            ("NOSTR_PRIVATE_KEY", "BUZZ_AUTH_TAG"),
+        ),
+    ]
+
+
 def test_github_workflow_connection_check_verifies_canonical_repository_and_workflow(
     monkeypatch,
 ):

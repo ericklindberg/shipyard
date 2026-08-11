@@ -69,6 +69,14 @@ class GitRefAdapter:
     runner: CommandRunner = _default_command_runner
     action: str = "git.ref"
 
+    @staticmethod
+    def _allowed_env(context: AdapterContext) -> tuple[str, ...]:
+        return (
+            ("NOSTR_PRIVATE_KEY", "BUZZ_AUTH_TAG")
+            if context.provider == "buzz-git"
+            else ()
+        )
+
     def _parameters(self, context: AdapterContext) -> tuple[str, str, Path]:
         remote = _config_string(context, "remote")
         ref = _config_string(context, "ref")
@@ -91,11 +99,15 @@ class GitRefAdapter:
     def check(self, context: AdapterContext) -> ConnectionCheck:
         remote, ref, repo = self._parameters(context)
         remote_code, _remote_output = self.runner(
-            ("git", "remote", "get-url", "--", remote), repo, ()
+            ("git", "remote", "get-url", "--", remote),
+            repo,
+            self._allowed_env(context),
         )
         if remote_code != 0:
             raise AdapterError("git connection verification requires a configured named remote")
-        code, output = self.runner(("git", "ls-remote", remote, ref), repo, ())
+        code, output = self.runner(
+            ("git", "ls-remote", remote, ref), repo, self._allowed_env(context)
+        )
         if code != 0:
             raise AdapterError("Git remote verification failed")
         observed = None
@@ -115,7 +127,7 @@ class GitRefAdapter:
         code, _output = self.runner(
             ("git", "push", "--porcelain", remote, f"{context.source_sha}:{ref}"),
             repo,
-            (),
+            self._allowed_env(context),
         )
         if code != 0:
             raise AdapterError("exact-ref git push failed; provider outcome requires readback")
@@ -132,7 +144,9 @@ class GitRefAdapter:
         self, context: AdapterContext, receipt: MutationReceipt
     ) -> ProviderReadback:
         remote, ref, repo = self._parameters(context)
-        code, output = self.runner(("git", "ls-remote", remote, ref), repo, ())
+        code, output = self.runner(
+            ("git", "ls-remote", remote, ref), repo, self._allowed_env(context)
+        )
         if code != 0:
             return ProviderReadback("unknown", receipt.operation_id, None, {"ref": ref})
         observed = None

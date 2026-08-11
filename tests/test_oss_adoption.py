@@ -59,3 +59,19 @@ def test_adoption_guide_covers_current_operator_surface() -> None:
         "No live provider validation",
     ):
         assert contract in guide
+
+
+def test_buzz_git_connection_guide_uses_request_aware_host_scoped_auth() -> None:
+    guide = (ROOT / "docs" / "CONNECTIONS.md").read_text(encoding="utf-8")
+
+    for contract in (
+        "Git 2.46 or newer",
+        "git-credential-nostr",
+        "credential.https://relay.example.com.helper nostr",
+        "credential.https://relay.example.com.useHttpPath true",
+        "NOSTR_PRIVATE_KEY",
+        "shipyard connection check buzz-git-production --repo . --json",
+        "Each smart-HTTP request receives a fresh",
+    ):
+        assert contract in guide
+    assert "http.extraHeader" in guide

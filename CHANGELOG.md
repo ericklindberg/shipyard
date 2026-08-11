@@ -13,6 +13,7 @@ All notable changes to Shipyard will be documented in this file. The format foll
 - Added typed source-bound Xcode Cloud and TestFlight adapters with exact candidate-tag, App Store relationship, and authoritative source/build/group readback.
 - Added typed OCI manifest promotion and Kubernetes deployment adapters with OCI config-label source binding, exact digest verification, deployment UID/resource-version fencing, and rollout readback.
 - Added a public adoption guide, roadmap, adapter contract harness, and structured GitHub issue forms.
+- Added offline Buzz Git/NIP-98 readiness inspection for Git version, named HTTPS remote, host-scoped credential helper, `useHttpPath`, and non-secret key-source state.
 
 ### Changed
 
@@ -27,6 +28,7 @@ All notable changes to Shipyard will be documented in this file. The format foll
 - Approval/review loaders reject symlinks and non-regular files; signing and allowed-signers verification use single-open snapshots to prevent pathname replacement races.
 - Apple mutation preflight now proves configured Git remote, exact candidate tag/SHA, Apple canonical reference, build/app identity, and beta-group/app ownership before POST.
 - OCI and Kubernetes mutations use bounded HTTPS transports with ambient proxies and redirects disabled, exact provider identity checks, no automatic retries, and fail-closed source/digest drift handling.
+- Buzz Git authentication requires Git 2.46+, a host-scoped request-aware `git-credential-nostr` helper, and a secure environment or `0600` key source; static authorization headers and credential-bearing remotes remain forbidden.
 
 ## [0.4.0] - 2026-08-10
 

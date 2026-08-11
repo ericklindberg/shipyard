@@ -7,14 +7,17 @@ import os
 import re
 import secrets
 import stat
+import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from .adapters.base import DeploymentAdapter
+from .runtime import RuntimeIdentityError, resolve_executable, sanitized_environment
 
 
 class _AdapterRegistry(Protocol):
@@ -99,6 +102,7 @@ _REQUIRED_OPTIONS = {
     "vercel": frozenset({"project", "repo_id", "token_env"}),
 }
 _BUZZ_ENV = ("BUZZ_AUTH_TAG", "BUZZ_PRIVATE_KEY", "BUZZ_RELAY_URL")
+_MINIMUM_NIP98_GIT = (2, 46, 0)
 
 
 def default_config_dir() -> Path:
@@ -579,6 +583,151 @@ class ConnectionStore:
         return removed
 
 
+def _resolve_buzz_git_executable(name: str, repo_path: Path) -> Path:
+    return resolve_executable(name, repo_path)
+
+
+def _run_buzz_git_command(argv: tuple[str, ...], repo_path: Path) -> tuple[int, str]:
+    completed = subprocess.run(  # noqa: S603 - executable path is resolved above
+        argv,
+        cwd=repo_path,
+        env=sanitized_environment(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    return completed.returncode, completed.stdout
+
+
+def _secure_nostr_keyfile(configured: str) -> bool:
+    path = Path(configured).expanduser()
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        return False
+    if hasattr(os, "geteuid") and metadata.st_uid != os.geteuid():
+        return False
+    mode = stat.S_IMODE(metadata.st_mode)
+    return bool(mode & stat.S_IRUSR) and not bool(mode & 0o177)
+
+
+def inspect_buzz_git_auth(repo_path: str | Path, remote: str) -> dict[str, object]:
+    """Inspect local NIP-98 Git readiness without network access or key reads."""
+    repo = Path(repo_path).expanduser().resolve()
+    issues: list[str] = []
+    git_path: Path | None = None
+    helper_available = False
+    try:
+        git_path = _resolve_buzz_git_executable("git", repo)
+    except (FileNotFoundError, RuntimeIdentityError):
+        issues.append("Git executable is unavailable")
+    try:
+        _resolve_buzz_git_executable("git-credential-nostr", repo)
+        helper_available = True
+    except (FileNotFoundError, RuntimeIdentityError):
+        issues.append("git-credential-nostr is unavailable")
+
+    git_version = "unknown"
+    if git_path is not None:
+        code, output = _run_buzz_git_command((str(git_path), "--version"), repo)
+        match = re.fullmatch(r"git version (\d+)\.(\d+)\.(\d+)(?:\.[0-9]+)?\s*", output)
+        if code != 0 or match is None:
+            issues.append("Git version could not be verified")
+        else:
+            version_tuple = tuple(int(part) for part in match.groups())
+            git_version = ".".join(match.groups())
+            if version_tuple < _MINIMUM_NIP98_GIT:
+                issues.append("Git 2.46.0 or newer is required for NIP-98 authentication")
+
+    remote_configured = False
+    remote_host: str | None = None
+    remote_url: str | None = None
+    if git_path is not None:
+        code, output = _run_buzz_git_command(
+            (str(git_path), "remote", "get-url", "--all", remote), repo
+        )
+        urls = [line.strip() for line in output.splitlines() if line.strip()]
+        if code != 0 or len(urls) != 1:
+            issues.append("Buzz remote must have exactly one configured fetch URL")
+        else:
+            parsed = urlsplit(urls[0])
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+            ):
+                issues.append("Buzz remote must be credential-free HTTPS without query or fragment")
+            else:
+                remote_configured = True
+                remote_host = parsed.hostname
+                remote_url = urls[0]
+
+    helper_host_scoped = False
+    use_http_path = False
+    if git_path is not None and remote_url is not None and remote_host is not None:
+        helper_key = f"credential.https://{remote_host}.helper"
+        code, output = _run_buzz_git_command(
+            (str(git_path), "config", "--get-all", helper_key), repo
+        )
+        helpers = [line.strip() for line in output.splitlines() if line.strip()]
+        helper_host_scoped = code == 0 and helpers == ["nostr"]
+        if not helper_host_scoped:
+            issues.append("Nostr credential helper is not host-scoped to the Buzz remote")
+        code, output = _run_buzz_git_command(
+            (
+                str(git_path),
+                "config",
+                "--get-urlmatch",
+                "credential.useHttpPath",
+                remote_url,
+            ),
+            repo,
+        )
+        use_http_path = code == 0 and output.strip().lower() == "true"
+        if not use_http_path:
+            issues.append("credential.useHttpPath must be true for the Buzz remote")
+
+    key_source = "missing"
+    key_ready = False
+    if os.environ.get("NOSTR_PRIVATE_KEY"):
+        key_source = "environment"
+        key_ready = True
+    elif git_path is not None:
+        code, output = _run_buzz_git_command(
+            (str(git_path), "config", "--get", "nostr.keyfile"), repo
+        )
+        values = [line.strip() for line in output.splitlines() if line.strip()]
+        if code == 0 and len(values) == 1:
+            key_source = "keyfile"
+            key_ready = _secure_nostr_keyfile(values[0])
+            if not key_ready:
+                issues.append("Nostr key file permissions must be 0600 or stricter")
+        else:
+            issues.append("Nostr private key source is not configured")
+
+    return {
+        "ready": not issues,
+        "git_version": git_version,
+        "git_minimum": "2.46.0",
+        "remote_host": remote_host,
+        "remote_configured": remote_configured,
+        "helper_available": helper_available,
+        "helper_host_scoped": helper_host_scoped,
+        "use_http_path": use_http_path,
+        "key_source": key_source,
+        "key_ready": key_ready,
+        "issues": issues,
+    }
+
+
 def verify_connection(
     profile: ConnectionProfile,
     repo_path: str | Path,
@@ -589,7 +738,6 @@ def verify_connection(
     """Validate a profile locally and optionally perform its read-only provider check."""
     from .adapters.base import AdapterContext
     from .adapters.registry import AdapterRegistry
-    from .runtime import RuntimeIdentityError, resolve_executable
 
     missing_check = sorted(
         name for name in profile.required_check_env_names() if not os.environ.get(name)
@@ -605,20 +753,34 @@ def verify_connection(
         except (FileNotFoundError, RuntimeIdentityError):
             missing_executable.append(executable_name)
 
+    buzz_git_auth: dict[str, object] | None = None
+    if profile.provider == "buzz-git":
+        buzz_git_auth = inspect_buzz_git_auth(
+            repo_path,
+            str(profile.config["remote"]),
+        )
+    buzz_git_blocked = buzz_git_auth is not None and not bool(buzz_git_auth["ready"])
+
     payload: dict[str, object] = {
         "connection": profile.name,
         "provider": profile.provider,
         "action": profile.action,
         "destination": profile.destination,
         "profile_digest": profile.digest,
-        "status": "blocked" if missing_check or missing_executable else "configured",
+        "status": (
+            "blocked"
+            if missing_check or missing_executable or buzz_git_blocked
+            else "configured"
+        ),
         "network_checked": False,
         "mutation_performed": False,
         "missing_credential_env": missing_check,
         "missing_deploy_env": missing_deploy,
         "missing_executable": missing_executable,
     }
-    if missing_check or missing_executable or not allow_network:
+    if buzz_git_auth is not None:
+        payload["buzz_git_auth"] = buzz_git_auth
+    if missing_check or missing_executable or buzz_git_blocked or not allow_network:
         return payload
 
     configured_registry = registry or AdapterRegistry()

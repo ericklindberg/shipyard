@@ -6,12 +6,14 @@ from pathlib import Path
 
 import pytest
 
+import shipyard.connections as connections
 from shipyard.adapters.base import ConnectionCheck
 from shipyard.cli import main
 from shipyard.connections import (
     ConnectionError,
     ConnectionProfile,
     ConnectionStore,
+    inspect_buzz_git_auth,
     render_playbook,
     verify_connection,
 )
@@ -518,6 +520,144 @@ def test_connection_cli_adds_github_actions_profile_and_generates_playbook(
     assert playbook.steps[0].action == "github.workflow"
     assert playbook.steps[0].config["repository_id"] == "1234"
     assert playbook.steps[0].config["workflow_id"] == "5678"
+
+
+def test_buzz_git_readiness_is_host_scoped_and_never_exposes_key_material(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    remote_url = "https://buzz.example.com/git/owner/repository.git"
+
+    monkeypatch.setenv("NOSTR_PRIVATE_KEY", "nsec-secret-must-not-appear")
+    monkeypatch.setattr(
+        connections,
+        "_resolve_buzz_git_executable",
+        lambda name, _repo: Path(f"/usr/local/bin/{name}"),
+    )
+
+    def command(argv: tuple[str, ...], _repo: Path) -> tuple[int, str]:
+        query = argv[1:]
+        responses = {
+            ("--version",): (0, "git version 2.46.3\n"),
+            ("remote", "get-url", "--all", "buzz"): (0, f"{remote_url}\n"),
+            (
+                "config",
+                "--get-all",
+                "credential.https://buzz.example.com.helper",
+            ): (0, "nostr\n"),
+            (
+                "config",
+                "--get-urlmatch",
+                "credential.useHttpPath",
+                remote_url,
+            ): (0, "true\n"),
+        }
+        return responses.get(query, (1, ""))
+
+    monkeypatch.setattr(connections, "_run_buzz_git_command", command)
+
+    result = inspect_buzz_git_auth(repo, "buzz")
+
+    assert result == {
+        "ready": True,
+        "git_version": "2.46.3",
+        "git_minimum": "2.46.0",
+        "remote_host": "buzz.example.com",
+        "remote_configured": True,
+        "helper_available": True,
+        "helper_host_scoped": True,
+        "use_http_path": True,
+        "key_source": "environment",
+        "key_ready": True,
+        "issues": [],
+    }
+    assert "nsec-secret" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    ("version", "helper", "key_mode", "expected_issue"),
+    [
+        ("2.43.0", "nostr", 0o600, "Git 2.46.0 or newer is required"),
+        ("2.46.0", "", 0o600, "credential helper is not host-scoped"),
+        ("2.46.0", "nostr", 0o644, "Nostr key file permissions must be 0600 or stricter"),
+    ],
+)
+def test_buzz_git_readiness_fails_closed_on_unsafe_local_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: str,
+    helper: str,
+    key_mode: int,
+    expected_issue: str,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    key = tmp_path / "nostr.key"
+    key.write_text("nsec-secret", encoding="utf-8")
+    key.chmod(key_mode)
+    remote_url = "https://buzz.example.com/git/owner/repository.git"
+    monkeypatch.delenv("NOSTR_PRIVATE_KEY", raising=False)
+    monkeypatch.setattr(
+        connections,
+        "_resolve_buzz_git_executable",
+        lambda name, _repo: Path(f"/usr/local/bin/{name}"),
+    )
+
+    def command(argv: tuple[str, ...], _repo: Path) -> tuple[int, str]:
+        query = argv[1:]
+        responses = {
+            ("--version",): (0, f"git version {version}\n"),
+            ("remote", "get-url", "--all", "buzz"): (0, f"{remote_url}\n"),
+            (
+                "config",
+                "--get-all",
+                "credential.https://buzz.example.com.helper",
+            ): (0 if helper else 1, f"{helper}\n" if helper else ""),
+            (
+                "config",
+                "--get-urlmatch",
+                "credential.useHttpPath",
+                remote_url,
+            ): (0, "true\n"),
+            ("config", "--get", "nostr.keyfile"): (0, f"{key}\n"),
+        }
+        return responses.get(query, (1, ""))
+
+    monkeypatch.setattr(connections, "_run_buzz_git_command", command)
+
+    result = inspect_buzz_git_auth(repo, "buzz")
+
+    assert result["ready"] is False
+    issues = result["issues"]
+    assert isinstance(issues, list)
+    assert any(expected_issue in issue for issue in issues)
+    assert str(key) not in json.dumps(result)
+    assert "nsec-secret" not in json.dumps(result)
+
+
+def test_buzz_git_connection_check_blocks_before_network_when_auth_is_not_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = ConnectionProfile.create(
+        "buzz-production",
+        "buzz-git",
+        {"remote": "buzz", "ref": "refs/heads/main"},
+    )
+    monkeypatch.setattr(
+        connections,
+        "inspect_buzz_git_auth",
+        lambda _repo, _remote: {"ready": False, "issues": ["Git upgrade required"]},
+    )
+
+    result = verify_connection(profile, tmp_path, allow_network=True)
+
+    assert result["status"] == "blocked"
+    assert result["network_checked"] is False
+    assert result["buzz_git_auth"] == {
+        "ready": False,
+        "issues": ["Git upgrade required"],
+    }
 
 
 def test_connection_cli_add_list_show_check_playbook_and_remove(

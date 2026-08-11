@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .candidate import ReleaseCandidate
 from .models import ReleaseRun
@@ -75,6 +76,76 @@ def _remote_urls(run: ReleaseRun) -> dict[str, str]:
             )
         result[name] = urls[0]
     return result
+
+
+def _buzz_remote_names(run: ReleaseRun) -> set[str]:
+    if run.provider != "buzz-git":
+        return set()
+    return {
+        str(step.config["remote"])
+        for step in run.steps
+        if step.action == "git.ref" and isinstance(step.config.get("remote"), str)
+    }
+
+
+def _optional_git_config(repo: Path, key: str) -> tuple[str, ...]:
+    git = resolve_executable("git", repo)
+    completed = subprocess.run(  # noqa: S603
+        (str(git), "config", "--get-all", key),
+        cwd=repo,
+        env=sanitized_environment(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if completed.returncode not in {0, 1}:
+        raise ExecutionSnapshotError("cannot inspect repository credential configuration")
+    return tuple(line.strip() for line in completed.stdout.splitlines() if line.strip())
+
+
+def _copy_buzz_auth_config(source: Path, snapshot: Path, remote_url: str) -> None:
+    parsed = urlsplit(remote_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ExecutionSnapshotError("Buzz snapshot remote must be credential-free HTTPS")
+    scope = parsed.netloc
+    helper_key = f"credential.https://{scope}.helper"
+    path_key = f"credential.https://{scope}.useHttpPath"
+    helpers = _optional_git_config(source, helper_key)
+    use_path = _optional_git_config(source, path_key)
+    if helpers != ("nostr",) or use_path != ("true",):
+        raise ExecutionSnapshotError(
+            "Buzz snapshot requires host-scoped nostr helper and useHttpPath=true"
+        )
+    _git(snapshot, "config", "--local", helper_key, "nostr")
+    _git(snapshot, "config", "--local", path_key, "true")
+
+    keyfiles = _optional_git_config(source, "nostr.keyfile")
+    if keyfiles:
+        if len(keyfiles) != 1:
+            raise ExecutionSnapshotError("Buzz snapshot requires one Nostr keyfile reference")
+        keyfile = Path(keyfiles[0]).expanduser()
+        try:
+            metadata = keyfile.lstat()
+        except OSError as exc:
+            raise ExecutionSnapshotError("Buzz Nostr keyfile is unavailable") from exc
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or (hasattr(os, "geteuid") and metadata.st_uid != os.geteuid())
+            or stat.S_IMODE(metadata.st_mode) & 0o177
+        ):
+            raise ExecutionSnapshotError("Buzz Nostr keyfile is unsafe")
+        _git(snapshot, "config", "--local", "nostr.keyfile", str(keyfile.resolve()))
+    elif not os.environ.get("NOSTR_PRIVATE_KEY"):
+        raise ExecutionSnapshotError("Buzz Nostr private key source is unavailable")
 
 
 def _copy_approved_artifact(
@@ -175,8 +246,11 @@ def prepare_execution_snapshot(
         )
         for existing in [line for line in _git(repository, "remote").splitlines() if line]:
             _git(repository, "remote", "remove", existing)
+        buzz_remotes = _buzz_remote_names(run)
         for name, url in sorted(remotes.items()):
             _git(repository, "remote", "add", name, url)
+            if name in buzz_remotes:
+                _copy_buzz_auth_config(run.repo_path, repository, url)
         _git(repository, "checkout", "--detach", "--force", run.source.sha)
 
         artifacts = candidate.payload.get("artifacts")

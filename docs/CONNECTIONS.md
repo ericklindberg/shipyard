@@ -117,16 +117,45 @@ The expanded tag must already resolve to the local candidate SHA. Before mutatio
 
 GitHub Enterprise Server and older GitHub API versions are intentionally unsupported because their dispatch endpoint may not return a durable run ID. Shipyard will not substitute a heuristic “latest run” lookup after mutation.
 
-For a Buzz-hosted Git repository, use the same exact-SHA adapter with a separately configured named remote:
+For a Buzz-hosted Git repository, use HTTPS with Buzz's request-aware NIP-98 credential helper. Git smart HTTP performs separate discovery and pack-transfer requests, so static `http.extraHeader` values and credential-bearing remote URLs are unsafe and unsupported.
+
+Requirements:
+
+- Git 2.46 or newer (`authtype` credential capability);
+- `git-credential-nostr` on `PATH`;
+- exactly one credential-free HTTPS URL for the named remote;
+- a Nostr key supplied by `NOSTR_PRIVATE_KEY` at process launch or by a current-user-owned key file with mode `0600` or stricter.
+- managed-agent identities also supply `BUZZ_AUTH_TAG` at process launch; member-owned keys can omit it. Never persist the attestation in Git config.
+
+Scope the helper to the Buzz host rather than enabling it for every Git service:
 
 ```bash
-git remote add buzz ssh://your-buzz-git-remote
+git remote add buzz https://relay.example.com/git/OWNER/REPOSITORY.git
+git config --local credential.https://relay.example.com.helper nostr
+git config --local credential.https://relay.example.com.useHttpPath true
+
+# Optional key-file integration. Create this file through your secret manager;
+# never put the key on argv or in the repository.
+install -d -m 700 ~/.config/nostr
+your-secret-manager read buzz-nostr-key > ~/.config/nostr/buzz.key
+chmod 600 ~/.config/nostr/buzz.key
+git config --local nostr.keyfile ~/.config/nostr/buzz.key
+
 shipyard connection add buzz-git-production \
   --provider buzz-git \
   --remote buzz \
   --ref refs/heads/main
+
+# Offline: reports Git/helper/remote/key-source readiness without reading key bytes.
+shipyard connection check buzz-git-production --repo . --json
+
+# Explicit read-only network proof. This invokes ls-remote, never push.
 shipyard connection check buzz-git-production --repo . --allow-network --json
 ```
+
+The offline result includes `buzz_git_auth` with the Git version, remote host, host-scoped-helper state, `useHttpPath`, key-source kind, and allowlisted issues. It never includes the remote's full path, key-file path, private key, authorization event, or signed header. Each smart-HTTP request receives a fresh method/URL-bound NIP-98 proof from Git's credential protocol.
+
+For managed automation, launch Shipyard through your secret manager so `BUZZ_AUTH_TAG` exists only in the process environment. Shipyard forwards only `NOSTR_PRIVATE_KEY` and `BUZZ_AUTH_TAG` to `git` for `buzz-git`; other Git providers receive neither variable.
 
 ### Buzz workflow
 
