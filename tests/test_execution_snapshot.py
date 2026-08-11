@@ -128,6 +128,31 @@ def test_artifact_copy_is_anchored_when_parent_path_is_swapped(
     assert (snapshot / "safe" / "release.bin").read_bytes() == approved
 
 
+def test_artifact_copy_rejects_symlinked_destination_parent(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "safe").mkdir(parents=True)
+    approved = b"approved-artifact"
+    (source / "safe" / "release.bin").write_bytes(approved)
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    redirected = snapshot / "redirected"
+    redirected.mkdir()
+    (snapshot / "safe").symlink_to(redirected, target_is_directory=True)
+
+    with pytest.raises(ExecutionSnapshotError, match="destination path is unsafe"):
+        _copy_approved_artifact(
+            source,
+            snapshot,
+            {
+                "path": "safe/release.bin",
+                "size": len(approved),
+                "sha256": hashlib.sha256(approved).hexdigest(),
+            },
+        )
+
+    assert not (redirected / "release.bin").exists()
+
+
 def test_private_copy_rejects_symlinked_destination_parent(tmp_path: Path) -> None:
     source = tmp_path / "private.key"
     source.write_text("private", encoding="utf-8")

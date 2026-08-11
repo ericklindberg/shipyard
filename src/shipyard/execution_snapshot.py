@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
 import tempfile
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -17,8 +19,8 @@ from .runtime import resolve_executable, sanitized_environment
 from .safe_files import (
     SafeFileError,
     copy_private_regular,
+    open_or_create_relative_parent,
     open_relative_regular,
-    relative_parts,
 )
 
 
@@ -220,27 +222,43 @@ def _copy_approved_artifact(
     ):
         raise ExecutionSnapshotError("candidate artifact evidence is malformed")
     try:
-        parts = relative_parts(relative)
         descriptor = open_relative_regular(source_root, relative)
     except SafeFileError as exc:
         raise ExecutionSnapshotError("candidate artifact escapes execution snapshot") from exc
-    destination = snapshot_root.joinpath(*parts)
-    temporary_path: Path | None = None
+    parent_descriptor: int | None = None
+    target_descriptor: int | None = None
+    temporary_name: str | None = None
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != expected_size:
             raise ExecutionSnapshotError("candidate artifact changed before snapshot")
-        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
-            destination.parent.resolve(strict=True).relative_to(snapshot_root)
-        except ValueError as exc:
-            raise ExecutionSnapshotError(
-                "candidate artifact parent escapes execution snapshot"
-            ) from exc
-        with tempfile.NamedTemporaryFile(
-            mode="wb", dir=destination.parent, prefix=".shipyard-artifact-", delete=False
-        ) as target:
-            temporary_path = Path(target.name)
+            parent_descriptor, destination_name = open_or_create_relative_parent(
+                snapshot_root, relative
+            )
+        except SafeFileError as exc:
+            raise ExecutionSnapshotError("candidate artifact destination path is unsafe") from exc
+        for _attempt in range(16):
+            temporary_name = f".shipyard-artifact-{secrets.token_hex(12)}"
+            try:
+                target_descriptor = os.open(
+                    temporary_name,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=parent_descriptor,
+                )
+                break
+            except FileExistsError:
+                continue
+        if target_descriptor is None:
+            raise ExecutionSnapshotError("cannot allocate candidate artifact temporary file")
+        target_file = os.fdopen(target_descriptor, "wb")
+        target_descriptor = None
+        with target_file as target:
             digest = hashlib.sha256()
             size = 0
             while chunk := os.read(descriptor, 1024 * 1024):
@@ -249,15 +267,27 @@ def _copy_approved_artifact(
                 size += len(chunk)
             target.flush()
             os.fsync(target.fileno())
+            os.fchmod(target.fileno(), 0o400)
         if size != expected_size or digest.hexdigest() != expected_digest:
             raise ExecutionSnapshotError("candidate artifact changed before snapshot")
-        os.chmod(temporary_path, 0o400)
-        os.replace(temporary_path, destination)
-        temporary_path = None
+        if temporary_name is None:
+            raise ExecutionSnapshotError("candidate artifact temporary identity is unavailable")
+        os.replace(
+            temporary_name,
+            destination_name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        temporary_name = None
     finally:
         os.close(descriptor)
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+        if target_descriptor is not None:
+            os.close(target_descriptor)
+        if temporary_name is not None and parent_descriptor is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
 
 
 def prepare_execution_snapshot(

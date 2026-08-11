@@ -86,6 +86,58 @@ def _open_absolute_parent(destination: Path) -> tuple[int, str]:
         raise SafeFileError("private destination path is unsafe") from exc
 
 
+def _open_absolute_directory(directory: Path) -> int:
+    if not directory.is_absolute():
+        raise SafeFileError("destination root must be absolute")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current: int | None = None
+    try:
+        current = os.open(Path("/"), directory_flags)
+        for component in directory.relative_to(Path("/")).parts:
+            if component in {"", ".", ".."} or "\x00" in component:
+                raise SafeFileError("destination root is unsafe")
+            child = os.open(component, directory_flags, dir_fd=current)
+            os.close(current)
+            current = child
+        return current
+    except (OSError, ValueError, SafeFileError) as exc:
+        if current is not None:
+            os.close(current)
+        raise SafeFileError("destination root is unsafe") from exc
+
+
+def open_or_create_relative_parent(root: Path, relative: str) -> tuple[int, str]:
+    """Return an anchored parent fd and leaf without following destination symlinks."""
+    parts = relative_parts(relative)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current: int | None = None
+    try:
+        current = _open_absolute_directory(root)
+        for component in parts[:-1]:
+            with suppress(FileExistsError):
+                os.mkdir(component, mode=0o700, dir_fd=current)
+            child = os.open(component, directory_flags, dir_fd=current)
+            os.close(current)
+            current = child
+            if not stat.S_ISDIR(os.fstat(current).st_mode):
+                raise SafeFileError("destination parent is not a directory")
+        return current, parts[-1]
+    except (OSError, SafeFileError) as exc:
+        if current is not None:
+            os.close(current)
+        raise SafeFileError("destination path is unsafe") from exc
+
+
 def copy_private_regular(source: Path, destination: Path) -> None:
     if not source.is_absolute():
         raise SafeFileError("private source path must be absolute")
