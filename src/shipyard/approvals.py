@@ -14,6 +14,7 @@ from typing import Any
 
 from .models import ReleaseRun
 from .runtime import resolve_executable, sanitized_environment
+from .safe_files import SafeFileError, copy_private_descriptor
 
 _REVIEW_API = "shipyard.candidate-review/v1"
 _APPROVAL_API = "shipyard.approval/v1"
@@ -247,24 +248,30 @@ def sign_approval_ssh(
 ) -> dict[str, Any]:
     """Sign canonical approval bytes with an operator-owned OpenSSH key.
 
-    Shipyard opens the key without following symlinks, passes the inherited descriptor
-    to ``ssh-keygen``, and never reads or stores key bytes.
+    Shipyard opens the key without following symlinks and makes one bounded,
+    process-private temporary copy for portable ``ssh-keygen`` invocation.
     """
     encoded = canonical_approval_bytes(statement)
     key_descriptor = _open_regular_descriptor(key_path, "SSH signing key")
     executable = resolve_executable("ssh-keygen", Path.cwd())
     try:
         with tempfile.TemporaryDirectory(prefix="shipyard-approval-sign-") as temporary:
-            statement_path = Path(temporary) / "approval.json"
+            temporary_root = Path(temporary).resolve(strict=True)
+            statement_path = temporary_root / "approval.json"
             statement_path.write_bytes(encoded)
             os.chmod(statement_path, 0o600)
+            signing_key = temporary_root / "approval-key"
+            try:
+                copy_private_descriptor(os.dup(key_descriptor), signing_key)
+            except (OSError, SafeFileError) as exc:
+                raise ApprovalPacketError("SSH signing key temporary copy failed") from exc
             completed = subprocess.run(  # noqa: S603
                 (
                     str(executable),
                     "-Y",
                     "sign",
                     "-f",
-                    f"/dev/fd/{key_descriptor}",
+                    str(signing_key),
                     "-n",
                     _SSH_NAMESPACE,
                     str(statement_path),
@@ -274,7 +281,6 @@ def sign_approval_ssh(
                 capture_output=True,
                 timeout=30,
                 check=False,
-                pass_fds=(key_descriptor,),
             )
             signature_path = statement_path.with_suffix(".json.sig")
             if completed.returncode != 0 or not signature_path.is_file():

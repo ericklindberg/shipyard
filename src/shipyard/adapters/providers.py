@@ -151,7 +151,7 @@ class GitRefAdapter:
         if not keyfile.is_absolute():
             raise AdapterError("Buzz Nostr keyfile must be absolute")
         with TemporaryDirectory(prefix="shipyard-buzz-auth-") as temporary:
-            private_copy = Path(temporary) / "nostr.key"
+            private_copy = Path(temporary).resolve(strict=True) / "nostr.key"
             try:
                 copy_private_regular(keyfile, private_copy)
             except SafeFileError as exc:

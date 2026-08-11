@@ -146,6 +146,14 @@ def copy_private_regular(source: Path, destination: Path) -> None:
         source_descriptor = open_relative_regular(Path("/"), relative)
     except (SafeFileError, ValueError) as exc:
         raise SafeFileError("private source file is unsafe") from exc
+    copy_private_descriptor(source_descriptor, destination)
+
+
+def copy_private_descriptor(source_descriptor: int, destination: Path) -> None:
+    """Copy an owned regular-file descriptor to a securely anchored private file.
+
+    This function takes ownership of ``source_descriptor`` and always closes it.
+    """
     destination_descriptor: int | None = None
     destination_parent_descriptor: int | None = None
     destination_name = destination.name

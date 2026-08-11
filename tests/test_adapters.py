@@ -198,6 +198,60 @@ def test_buzz_git_ref_snapshots_keyfile_for_each_operation(tmp_path, monkeypatch
     assert not observed_copy.exists()
 
 
+def test_buzz_git_ref_canonicalizes_process_owned_temporary_alias(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("NOSTR_PRIVATE_KEY", raising=False)
+    keyfile = tmp_path / "nostr.key"
+    keyfile.write_text("synthetic-private-key", encoding="utf-8")
+    keyfile.chmod(0o600)
+    real_temporary = tmp_path / "private" / "temporary"
+    real_temporary.mkdir(parents=True)
+    alias = tmp_path / "temporary-alias"
+    alias.symlink_to(real_temporary, target_is_directory=True)
+    observed_copy: Path | None = None
+
+    class AliasTemporaryDirectory:
+        def __enter__(self):
+            return str(alias)
+
+        def __exit__(self, *_args):
+            for child in real_temporary.iterdir():
+                child.unlink()
+            real_temporary.rmdir()
+            alias.unlink()
+
+    monkeypatch.setattr(
+        "shipyard.adapters.providers.TemporaryDirectory",
+        lambda **_kwargs: AliasTemporaryDirectory(),
+    )
+
+    def runner(command, cwd, allowed_env):
+        nonlocal observed_copy
+        if command == ("git", "remote", "get-url", "--all", "buzz"):
+            return 0, "https://buzz.example.com/git/owner/repository.git\n"
+        if command == ("git", "config", "--get", "nostr.keyfile"):
+            return 0, f"{keyfile}\n"
+        configured = next(
+            value.removeprefix("nostr.keyfile=")
+            for value in command
+            if value.startswith("nostr.keyfile=")
+        )
+        observed_copy = Path(configured)
+        assert observed_copy.parent == real_temporary
+        assert observed_copy.read_text(encoding="utf-8") == "synthetic-private-key"
+        return 0, f"{SHA}\trefs/heads/main\n"
+
+    assert GitRefAdapter(runner=runner).check(
+        context(
+            "buzz-git",
+            {"remote": "buzz", "ref": "refs/heads/main", "repo_path": str(tmp_path)},
+        )
+    ).status == "verified"
+    assert observed_copy is not None
+    assert not observed_copy.exists()
+
+
 def test_github_workflow_connection_check_verifies_canonical_repository_and_workflow(
     monkeypatch,
 ):
