@@ -451,6 +451,9 @@ class ReleaseExecutor:
                         freeze_execution_snapshot(dispatch_run.repo_path)
                     except ExecutionSnapshotError as exc:
                         raise ProvenanceDriftError(str(exc)) from exc
+                    except ProvenanceDriftError:
+                        self._cleanup_snapshot_with_audit(run_id)
+                        raise
             try:
                 if step.action:
                     step_status, exit_code, output_digest, output_preview = (
@@ -492,6 +495,10 @@ class ReleaseExecutor:
                 run_status = "uncertain" if step_status == "uncertain" else "failed"
                 return self.ledger.set_run_status(run_id, run_status)
         completed = self.ledger.set_run_status(run_id, "succeeded")
+        self._cleanup_snapshot_with_audit(run_id)
+        return completed
+
+    def _cleanup_snapshot_with_audit(self, run_id: str) -> None:
         try:
             cleanup_execution_snapshot(self.ledger.state_dir, run_id)
         except (ExecutionSnapshotError, OSError) as exc:
@@ -504,7 +511,6 @@ class ReleaseExecutor:
                     "snapshot_run_id": run_id,
                 },
             )
-        return completed
 
     def _run_step(
         self,

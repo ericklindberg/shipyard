@@ -13,6 +13,7 @@ from shipyard.execution_snapshot import (
     ExecutionSnapshotError,
     _copy_approved_artifact,
     _copy_buzz_auth_config,
+    _rebind_buzz_auth_config,
     execution_snapshot_run,
     freeze_execution_snapshot,
 )
@@ -70,6 +71,29 @@ def test_buzz_snapshot_copies_only_safe_credential_references(
     assert private_copy.read_text(encoding="utf-8") == "nsec-secret-must-not-be-copied"
     assert _git(snapshot, "config", "--local", "--get-all", "credential.helper") == ""
     assert "nsec-secret" not in (snapshot / ".git" / "config").read_text(encoding="utf-8")
+
+
+def test_buzz_snapshot_rebinds_private_key_after_atomic_relocation(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    _git(temporary, "init", "-q")
+    keyfile = tmp_path / "private.key"
+    keyfile.write_text("private", encoding="utf-8")
+    keyfile.chmod(0o600)
+    _git(git_repo, "config", "nostr.keyfile", str(keyfile))
+    _git(git_repo, "config", "credential.https://buzz.example.com.helper", "nostr")
+    _git(git_repo, "config", "credential.https://buzz.example.com.useHttpPath", "true")
+
+    _copy_buzz_auth_config(git_repo, temporary, "https://buzz.example.com/repo.git")
+    final = tmp_path / "final"
+    os.replace(temporary, final)
+    _rebind_buzz_auth_config(final)
+
+    configured = Path(_git(final, "config", "--get", "nostr.keyfile"))
+    assert configured == final / ".git" / "shipyard-credentials" / "nostr.key"
+    assert configured.is_file()
 
 
 def test_buzz_snapshot_rejects_arbitrary_credential_helper_command(

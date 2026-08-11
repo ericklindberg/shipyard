@@ -202,6 +202,23 @@ def _copy_buzz_auth_config(source: Path, snapshot: Path, remote_url: str) -> Non
         raise ExecutionSnapshotError("Buzz Nostr private key source is unavailable")
 
 
+def _rebind_buzz_auth_config(snapshot: Path) -> None:
+    private_copy = snapshot / ".git" / "shipyard-credentials" / "nostr.key"
+    if not os.path.lexists(private_copy):
+        return
+    try:
+        descriptor = open_relative_regular(snapshot, ".git/shipyard-credentials/nostr.key")
+    except SafeFileError as exc:
+        raise ExecutionSnapshotError("snapshot Buzz key path is unsafe") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise ExecutionSnapshotError("snapshot Buzz key permissions are unsafe")
+    finally:
+        os.close(descriptor)
+    _git(snapshot, "config", "--local", "nostr.keyfile", str(private_copy))
+
+
 def _copy_approved_artifact(
     source_root: Path,
     snapshot_root: Path,
@@ -337,6 +354,7 @@ def prepare_execution_snapshot(
             _copy_approved_artifact(source_root, repository, item)
 
         os.replace(repository, final)
+        _rebind_buzz_auth_config(final)
         return replace(run, repo_path=final.resolve())
     except BaseException:
         if final.exists():
