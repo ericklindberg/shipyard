@@ -5,6 +5,8 @@ import stat
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 
+_MAX_PRIVATE_FILE_BYTES = 1024 * 1024
+
 
 class SafeFileError(RuntimeError):
     pass
@@ -166,6 +168,8 @@ def copy_private_descriptor(source_descriptor: int, destination: Path) -> None:
             or bool(stat.S_IMODE(metadata.st_mode) & 0o177)
         ):
             raise SafeFileError("private source file ownership or mode is unsafe")
+        if metadata.st_size > _MAX_PRIVATE_FILE_BYTES:
+            raise SafeFileError("private source file is too large")
         destination_parent_descriptor, destination_name = _open_absolute_parent(destination)
         destination_descriptor = os.open(
             destination_name,
@@ -177,7 +181,11 @@ def copy_private_descriptor(source_descriptor: int, destination: Path) -> None:
             0o600,
             dir_fd=destination_parent_descriptor,
         )
+        copied = 0
         while chunk := os.read(source_descriptor, 64 * 1024):
+            copied += len(chunk)
+            if copied > _MAX_PRIVATE_FILE_BYTES:
+                raise SafeFileError("private source file is too large")
             view = memoryview(chunk)
             while view:
                 written = os.write(destination_descriptor, view)

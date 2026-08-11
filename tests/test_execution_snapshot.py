@@ -192,6 +192,22 @@ def test_private_copy_rejects_symlinked_destination_parent(tmp_path: Path) -> No
     assert not (outside / "nostr.key").exists()
 
 
+def test_private_copy_rejects_oversized_source_without_partial_destination(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.key"
+    source.write_bytes(b"x" * (1024 * 1024 + 1))
+    source.chmod(0o600)
+    destination_parent = tmp_path / "credentials"
+    destination_parent.mkdir(mode=0o700)
+    destination = destination_parent / "nostr.key"
+
+    with pytest.raises(SafeFileError, match="private source file is too large"):
+        copy_private_regular(source, destination)
+
+    assert not destination.exists()
+
+
 def test_freeze_rejects_symlink_descendants(tmp_path: Path) -> None:
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
