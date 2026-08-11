@@ -11,7 +11,7 @@ def test_readme_install_url_tracks_the_release_version():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     release_url = (
         "https://github.com/ericklindberg/shipyard/releases/download/"
-        f"v{__version__}/gary_shipyard-{__version__}-py3-none-any.whl"
+        f"v{__version__}/shipyard_release-{__version__}-py3-none-any.whl"
     )
 
     assert release_url in readme

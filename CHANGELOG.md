@@ -4,14 +4,29 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-10
+
+### Added
+
+- Added a credential-free governed quickstart, deterministic offline Markdown/HTML evidence reports, bounded read-only provider waiting, and local-only GitHub Actions bootstrap planning.
+- Added canonical candidate-review packets, OpenSSH-signed portable approvals, ledger-bound import, verified provenance, and configurable distinct-principal approval quorum.
+- Added typed source-bound Xcode Cloud and TestFlight adapters with exact candidate-tag, App Store relationship, and authoritative source/build/group readback.
+- Added typed OCI manifest promotion and Kubernetes deployment adapters with OCI config-label source binding, exact digest verification, deployment UID/resource-version fencing, and rollout readback.
+- Added a public adoption guide, roadmap, adapter contract harness, and structured GitHub issue forms.
+
 ### Changed
 
+- Renamed the Python distribution from `gary-shipyard` to `shipyard-release` while preserving the `shipyard` command.
+- Typed external adapters now execute from a state-owned detached snapshot rebuilt against the approved candidate before provider mutation.
 - Refactored portable evidence verification into bounded, side-effect-free identity, audit, step, readback, receipt, and orchestration stages while preserving the `shipyard.evidence/v1` report contract and fail-closed validation order.
 - Refactored external-command policy classification into bounded wrapper and command-family stages while preserving existing classifications, recursive normalization, and default-deny behavior.
 
 ### Security
 
 - Offline evidence verification now rejects non-string run, step, and provider-readback statuses as invalid evidence instead of allowing unhashable JSON arrays or objects to escape as verifier exceptions.
+- Approval/review loaders reject symlinks and non-regular files; signing and allowed-signers verification use single-open snapshots to prevent pathname replacement races.
+- Apple mutation preflight now proves configured Git remote, exact candidate tag/SHA, Apple canonical reference, build/app identity, and beta-group/app ownership before POST.
+- OCI and Kubernetes mutations use bounded HTTPS transports with ambient proxies and redirects disabled, exact provider identity checks, no automatic retries, and fail-closed source/digest drift handling.
 
 ## [0.4.0] - 2026-08-10
 
@@ -81,7 +96,8 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 - Initial local-first exact-SHA release orchestration MVP.
 
-[Unreleased]: https://github.com/ericklindberg/shipyard/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/ericklindberg/shipyard/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ericklindberg/shipyard/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ericklindberg/shipyard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ericklindberg/shipyard/releases/tag/v0.3.0
 
