@@ -16,6 +16,8 @@ class PlaybookError(ValueError):
 
 _ID = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _NAMED_GIT_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+_APPLE_SOURCE_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_CANDIDATE_TAG = re.compile(r"^refs/tags/shipyard-candidate-[0-9a-f]{40}$")
 _EFFECTS = {"verify", "build", "external"}
 _GIT_GLOBAL_OPTIONS_WITH_VALUE = {
     "-C",
@@ -634,6 +636,27 @@ def _validate_adapter_config(action: str, config: dict[str, Any], step_id: str) 
             or remote.endswith("/")
         ):
             raise PlaybookError(f"git.ref config for {step_id} must use a named Git remote")
+    if action == "xcodecloud.build":
+        reference = config.get("git_reference_name")
+        remote = config.get("source_remote")
+        if reference is None or remote is None:
+            raise PlaybookError(
+                f"xcodecloud.build config for {step_id} requires "
+                "git_reference_name and source_remote"
+            )
+        if not isinstance(reference, str) or _CANDIDATE_TAG.fullmatch(reference) is None:
+            raise PlaybookError(
+                f"xcodecloud.build config for {step_id} must use an exact candidate tag"
+            )
+        if (
+            not isinstance(remote, str)
+            or _APPLE_SOURCE_REMOTE.fullmatch(remote) is None
+            or ".." in remote
+            or remote.endswith(".")
+        ):
+            raise PlaybookError(
+                f"xcodecloud.build config for {step_id} must use a named Git remote"
+            )
 
 
 def _parse_adapter_step(

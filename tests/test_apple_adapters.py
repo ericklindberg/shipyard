@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Iterable
 
 import pytest
@@ -31,6 +32,9 @@ def _context() -> AdapterContext:
         config={
             "workflow_id": "workflow-1",
             "git_reference_id": "gitref-1",
+            "git_reference_name": f"refs/tags/shipyard-candidate-{'a' * 40}",
+            "source_remote": "origin",
+            "repo_path": ".",
             "token_env": "APPLE_ASC_TOKEN",
             "clean": True,
         },
@@ -41,13 +45,28 @@ def _resource(resource_type: str, resource_id: str, **extra):
     return HttpResponse(200, {"data": {"type": resource_type, "id": resource_id, **extra}})
 
 
+def _git_reference():
+    return _resource(
+        "scmGitReferences",
+        "gitref-1",
+        attributes={"canonicalName": f"refs/tags/shipyard-candidate-{'a' * 40}"},
+    )
+
+
+def _xcode_adapter(transport, observed_sha: str = "a" * 40):
+    return XcodeCloudBuildAdapter(
+        transport,
+        source_resolver=lambda repo_path, remote, reference: observed_sha,
+    )
+
+
 def test_xcode_cloud_check_verifies_canonical_workflow_and_git_reference(monkeypatch):
     monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
     transport = FakeTransport(
-        [_resource("ciWorkflows", "workflow-1"), _resource("scmGitReferences", "gitref-1")]
+        [_resource("ciWorkflows", "workflow-1"), _git_reference()]
     )
 
-    result = XcodeCloudBuildAdapter(transport).check(_context())
+    result = _xcode_adapter(transport).check(_context())
 
     assert result.status == "verified"
     assert result.identity == "workflow-1:gitref-1"
@@ -66,12 +85,12 @@ def test_xcode_cloud_execute_revalidates_identity_and_posts_official_relationshi
     transport = FakeTransport(
         [
             _resource("ciWorkflows", "workflow-1"),
-            _resource("scmGitReferences", "gitref-1"),
+            _git_reference(),
             created,
         ]
     )
 
-    receipt = XcodeCloudBuildAdapter(transport).execute(_context())
+    receipt = _xcode_adapter(transport).execute(_context())
 
     assert receipt.operation_id == "build-run-9"
     assert receipt.submitted_sha == "a" * 40
@@ -162,6 +181,52 @@ def test_xcode_cloud_readback_fails_on_provider_relationship_drift(monkeypatch):
     assert XcodeCloudBuildAdapter(transport).readback(_context(), receipt).status == "failed"
 
 
+def test_xcode_cloud_refuses_post_when_remote_candidate_tag_does_not_match_source(
+    monkeypatch,
+):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    transport = FakeTransport(
+        [_resource("ciWorkflows", "workflow-1"), _git_reference()]
+    )
+
+    with pytest.raises(AdapterError, match="approved source SHA"):
+        _xcode_adapter(transport, observed_sha="b" * 40).execute(_context())
+
+    assert [call["method"] for call in transport.calls] == ["GET", "GET"]
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_xcode_cloud_source_resolver_reads_lightweight_and_annotated_candidate_tags(
+    git_repo, tmp_path, annotated
+):
+    source_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    reference = f"refs/tags/shipyard-candidate-{source_sha}"
+    tag_name = reference.removeprefix("refs/tags/")
+    tag_command = ["git", "tag"]
+    if annotated:
+        tag_command.extend(["-a", "-m", "candidate"])
+    tag_command.append(tag_name)
+    subprocess.run(tag_command, cwd=git_repo, check=True)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)], cwd=git_repo, check=True
+    )
+    subprocess.run(["git", "push", "origin", reference], cwd=git_repo, check=True)
+
+    observed = XcodeCloudBuildAdapter._resolve_remote_source(
+        git_repo, "origin", reference
+    )
+
+    assert observed == source_sha
+
+
 @pytest.mark.parametrize(
     ("config_update", "message"),
     [
@@ -176,7 +241,7 @@ def test_xcode_cloud_rejects_unsafe_configuration(monkeypatch, config_update, me
     context.config.update(config_update)
 
     with pytest.raises(AdapterError, match=message):
-        XcodeCloudBuildAdapter(FakeTransport([])).check(context)
+        _xcode_adapter(FakeTransport([])).check(context)
 
 
 def _testflight_context() -> AdapterContext:

@@ -100,6 +100,8 @@ token_env = "AWS_SECRET_ACCESS_KEY"
             "xcodecloud.build",
             '''workflow_id = "workflow-1"
 git_reference_id = "gitref-1"
+git_reference_name = "refs/tags/shipyard-candidate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+source_remote = "origin"
 token_env = "APPLE_ASC_TOKEN"
 clean = true''',
         ),
@@ -159,6 +161,8 @@ action = "xcodecloud.build"
 [steps.config]
 workflow_id = "workflow-1"
 git_reference_id = "gitref-1"
+git_reference_name = "refs/tags/shipyard-candidate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+source_remote = "origin"
 token_env = "GITHUB_TOKEN"
 ''',
         encoding="utf-8",

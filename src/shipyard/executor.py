@@ -487,7 +487,7 @@ class ReleaseExecutor:
 
     def _adapter_context(self, run: ReleaseRun, step: StepRun) -> AdapterContext:
         config = dict(step.config)
-        config.setdefault("repo_path", str(run.repo_path))
+        config["repo_path"] = str(run.repo_path)
         return AdapterContext(
             run_id=run.run_id,
             source_sha=run.source.sha,

@@ -628,6 +628,23 @@ token_env = "RENDER_API_KEY"
     return path
 
 
+def test_executor_overwrites_playbook_repo_path_with_governed_run_repository(
+    git_repo, tmp_path
+):
+    playbook_path = typed_playbook(tmp_path)
+    playbook_path.write_text(
+        playbook_path.read_text(encoding="utf-8") + 'repo_path = "/attacker/path"\n',
+        encoding="utf-8",
+    )
+    ledger = Ledger(tmp_path / "state")
+    executor = ReleaseExecutor(ledger)
+    prepared = executor.start(git_repo, load_playbook(playbook_path))
+
+    adapter_context = executor._adapter_context(prepared, prepared.steps[0])
+
+    assert adapter_context.config["repo_path"] == str(git_repo.resolve())
+
+
 class SequenceAdapter:
     action = "render.deploy"
 

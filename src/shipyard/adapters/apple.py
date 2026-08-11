@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote
 
+from ..runtime import resolve_executable, sanitized_environment
 from .base import (
     AdapterContext,
     AdapterError,
@@ -18,6 +22,7 @@ from .http import HttpResponse, HttpTransport
 _APPLE_API = "https://api.appstoreconnect.apple.com"
 _RESOURCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
+_NAMED_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _FAILURE_COMPLETIONS = {"FAILED", "ERRORED", "CANCELED", "SKIPPED"}
 
 
@@ -55,6 +60,9 @@ def _relationship_id(resource: dict[str, object], name: str, expected_type: str)
 class _XcodeCoordinates:
     workflow_id: str
     git_reference_id: str
+    git_reference_name: str
+    source_remote: str
+    repo_path: Path
     token_env: str
     clean: bool
     base: str
@@ -69,8 +77,45 @@ class XcodeCloudBuildAdapter:
 
     action = "xcodecloud.build"
 
-    def __init__(self, transport: HttpTransport) -> None:
+    def __init__(
+        self,
+        transport: HttpTransport,
+        *,
+        source_resolver: Callable[[Path, str, str], str] | None = None,
+    ) -> None:
         self.transport = transport
+        self.source_resolver = source_resolver or self._resolve_remote_source
+
+    @staticmethod
+    def _resolve_remote_source(repo_path: Path, remote: str, reference: str) -> str:
+        git = resolve_executable("git", repo_path)
+        try:
+            completed = subprocess.run(  # noqa: S603
+                (str(git), "ls-remote", "--exit-code", remote, reference, f"{reference}^{{}}"),
+                cwd=repo_path,
+                env=sanitized_environment(),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AdapterError("Xcode Cloud source remote preflight failed") from exc
+        if completed.returncode != 0:
+            raise AdapterError("Xcode Cloud source remote preflight failed")
+        refs: dict[str, str] = {}
+        for line in completed.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 2 or re.fullmatch(r"[0-9a-f]{40}", parts[0]) is None:
+                raise AdapterError("Xcode Cloud source remote returned malformed identity")
+            if parts[1] in refs:
+                raise AdapterError("Xcode Cloud source remote returned ambiguous identity")
+            refs[parts[1]] = parts[0]
+        observed = refs.get(f"{reference}^{{}}", refs.get(reference))
+        if observed is None:
+            raise AdapterError("Xcode Cloud source remote omitted the candidate reference")
+        return observed
 
     @staticmethod
     def _coordinates(context: AdapterContext) -> _XcodeCoordinates:
@@ -88,9 +133,30 @@ class XcodeCloudBuildAdapter:
         configured_base = context.config.get("api_base", _APPLE_API)
         if not isinstance(configured_base, str) or configured_base.rstrip("/") != _APPLE_API:
             raise AdapterError("xcodecloud.build only connects to the official Apple API")
+        git_reference_name = _config_string(context, "git_reference_name")
+        expected_reference = f"refs/tags/shipyard-candidate-{context.source_sha}"
+        if git_reference_name != expected_reference:
+            raise AdapterError("xcodecloud.build requires the exact candidate tag reference")
+        source_remote = _config_string(context, "source_remote")
+        if (
+            _NAMED_REMOTE.fullmatch(source_remote) is None
+            or ".." in source_remote
+            or source_remote.endswith(".")
+        ):
+            raise AdapterError("xcodecloud.build source_remote must be a named Git remote")
+        configured_repo = _config_string(context, "repo_path")
+        try:
+            repo_path = Path(configured_repo).resolve(strict=True)
+        except OSError as exc:
+            raise AdapterError("xcodecloud.build governed repository is unavailable") from exc
+        if not repo_path.is_dir():
+            raise AdapterError("xcodecloud.build governed repository is unavailable")
         coordinates = _XcodeCoordinates(
             workflow_id,
             git_reference_id,
+            git_reference_name,
+            source_remote,
+            repo_path,
             token_env,
             clean,
             _APPLE_API,
@@ -141,6 +207,21 @@ class XcodeCloudBuildAdapter:
             raise AdapterError(
                 "Xcode Cloud Git reference verification returned a different identity"
             )
+        attributes = git_reference.get("attributes")
+        if (
+            not isinstance(attributes, dict)
+            or attributes.get("canonicalName") != coordinates.git_reference_name
+        ):
+            raise AdapterError("Xcode Cloud Git reference does not match the candidate tag")
+        observed_sha = self.source_resolver(
+            coordinates.repo_path,
+            coordinates.source_remote,
+            coordinates.git_reference_name,
+        )
+        if observed_sha != context.source_sha:
+            raise AdapterError(
+                "Xcode Cloud candidate tag does not resolve to the approved source SHA"
+            )
         return coordinates, headers
 
     def check(self, context: AdapterContext) -> ConnectionCheck:
@@ -153,6 +234,9 @@ class XcodeCloudBuildAdapter:
             {
                 "workflow_id": coordinates.workflow_id,
                 "git_reference_id": coordinates.git_reference_id,
+                "git_reference_name": coordinates.git_reference_name,
+                "source_remote": coordinates.source_remote,
+                "source_sha": context.source_sha,
             },
         )
 
