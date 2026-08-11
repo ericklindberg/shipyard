@@ -430,10 +430,15 @@ class ReleaseExecutor:
                         "release candidate changed immediately before external execution"
                     )
                 if step.action:
+                    snapshot_preexisting = os.path.lexists(
+                        self.ledger.state_dir / "snapshots" / run_id
+                    )
+                    snapshot_created = False
                     try:
                         dispatch_run = prepare_execution_snapshot(
                             self.ledger.state_dir, current_run, revalidated
                         )
+                        snapshot_created = not snapshot_preexisting
                         if current_run.provider == "buzz-git":
                             remote = step.config.get("remote")
                             if not isinstance(remote, str):
@@ -450,9 +455,12 @@ class ReleaseExecutor:
                             )
                         freeze_execution_snapshot(dispatch_run.repo_path)
                     except ExecutionSnapshotError as exc:
+                        if snapshot_created:
+                            self._cleanup_snapshot_with_audit(run_id)
                         raise ProvenanceDriftError(str(exc)) from exc
                     except ProvenanceDriftError:
-                        self._cleanup_snapshot_with_audit(run_id)
+                        if snapshot_created:
+                            self._cleanup_snapshot_with_audit(run_id)
                         raise
             try:
                 if step.action:

@@ -31,6 +31,7 @@ from shipyard.adapters.providers import (
     VercelAdapter,
 )
 from shipyard.adapters.registry import AdapterRegistry
+from shipyard.execution_snapshot import ExecutionSnapshotError
 from shipyard.executor import ProvenanceDriftError, ReleaseExecutor
 from shipyard.ledger import Ledger, LedgerError
 from shipyard.playbook import PlaybookError, load_playbook
@@ -873,6 +874,33 @@ def test_successful_run_audits_snapshot_cleanup_oserror(
     assert ledger.list_audit_events(prepared.run_id)[-1]["event_type"] == "snapshot.cleanup_failed"
 
 
+def test_freeze_failure_removes_snapshot_created_by_current_attempt(
+    git_repo, tmp_path, monkeypatch
+):
+    ledger = Ledger(tmp_path / "state")
+    executor = ReleaseExecutor(
+        ledger,
+        AdapterRegistry([SnapshotProbeAdapter(git_repo)]),  # type: ignore[list-item]
+    )
+    prepared = executor.start(git_repo, load_playbook(typed_playbook(tmp_path)))
+
+    def fail_freeze(_snapshot: Path) -> None:
+        raise ExecutionSnapshotError("synthetic freeze failure")
+
+    monkeypatch.setattr("shipyard.executor.freeze_execution_snapshot", fail_freeze)
+    with pytest.raises(ProvenanceDriftError, match="synthetic freeze failure"):
+        executor.resume(
+            prepared.run_id,
+            execute_external=True,
+            confirm_sha=prepared.source_sha,
+            approve_candidate=prepared.candidate_digest,
+            approval_actor="pytest-reviewer",
+            approval_reason="freeze cleanup regression",
+        )
+
+    assert not (ledger.state_dir / "snapshots" / prepared.run_id).exists()
+
+
 def test_external_adapter_rejects_remote_drift_after_candidate_approval(
     git_repo, tmp_path
 ):
@@ -927,6 +955,8 @@ def test_external_adapter_rejects_preexisting_unmanifested_snapshot(git_repo, tm
             approval_actor="pytest-reviewer",
             approval_reason="leftover snapshot regression",
         )
+
+    assert leftover.exists()
 
 
 class ReceiptAuditFailureAdapter(SequenceAdapter):
