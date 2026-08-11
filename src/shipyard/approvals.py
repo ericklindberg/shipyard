@@ -1,18 +1,26 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import os
 import re
+import subprocess
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .models import ReleaseRun
+from .runtime import resolve_executable, sanitized_environment
 
 _REVIEW_API = "shipyard.candidate-review/v1"
 _APPROVAL_API = "shipyard.approval/v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _UTC_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_SSH_PRINCIPAL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._+-]{0,254}$")
+_SSH_NAMESPACE = "shipyard"
 
 
 class ApprovalPacketError(ValueError):
@@ -127,3 +135,162 @@ def build_approval_statement(
         "reason": reason,
         "approved_at": approved_at,
     }
+
+
+def _validate_approval_statement(statement: dict[str, Any]) -> None:
+    if statement.get("api_version") != _APPROVAL_API:
+        raise ApprovalPacketError(f"api_version must be {_APPROVAL_API}")
+    for key in (
+        "review_sha256",
+        "candidate_digest",
+        "source_sha",
+        "provider",
+        "destination",
+        "actor",
+        "reason",
+        "approved_at",
+    ):
+        _require_string(statement, key)
+    if _SHA256.fullmatch(statement["review_sha256"]) is None:
+        raise ApprovalPacketError("review_sha256 must be a lowercase SHA-256 digest")
+    if _SHA256.fullmatch(statement["candidate_digest"]) is None:
+        raise ApprovalPacketError("candidate_digest must be a lowercase SHA-256 digest")
+    if _GIT_SHA.fullmatch(statement["source_sha"]) is None:
+        raise ApprovalPacketError("source_sha must be a lowercase 40-character Git SHA")
+    if _SSH_PRINCIPAL.fullmatch(statement["actor"]) is None:
+        raise ApprovalPacketError("approval actor is not a valid SSH signing principal")
+    _canonical_utc_timestamp(statement["approved_at"])
+
+
+def canonical_approval_bytes(statement: dict[str, Any]) -> bytes:
+    _validate_approval_statement(statement)
+    return _canonical_json(statement)
+
+
+def _regular_path(value: str | Path, label: str) -> Path:
+    original = Path(value).expanduser()
+    if original.is_symlink():
+        raise ApprovalPacketError(f"{label} must not be a symlink")
+    try:
+        path = original.resolve(strict=True)
+    except OSError as exc:
+        raise ApprovalPacketError(f"{label} is not readable") from exc
+    if not path.is_file():
+        raise ApprovalPacketError(f"{label} must be a regular file")
+    return path
+
+
+def sign_approval_ssh(
+    statement: dict[str, Any], *, key_path: str | Path
+) -> dict[str, Any]:
+    """Sign canonical approval bytes with an operator-owned OpenSSH key.
+
+    Shipyard passes the key path to ``ssh-keygen`` and never reads or stores key bytes.
+    """
+    encoded = canonical_approval_bytes(statement)
+    key = _regular_path(key_path, "SSH signing key")
+    executable = resolve_executable("ssh-keygen", Path.cwd())
+    with tempfile.TemporaryDirectory(prefix="shipyard-approval-sign-") as temporary:
+        statement_path = Path(temporary) / "approval.json"
+        statement_path.write_bytes(encoded)
+        os.chmod(statement_path, 0o600)
+        completed = subprocess.run(  # noqa: S603
+            (
+                str(executable),
+                "-Y",
+                "sign",
+                "-f",
+                str(key),
+                "-n",
+                _SSH_NAMESPACE,
+                str(statement_path),
+            ),
+            env=sanitized_environment(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        signature_path = statement_path.with_suffix(".json.sig")
+        if completed.returncode != 0 or not signature_path.is_file():
+            raise ApprovalPacketError("SSH approval signing failed")
+        signature = base64.b64encode(signature_path.read_bytes()).decode("ascii")
+    return {
+        "api_version": "shipyard.signed-approval/v1",
+        "statement": dict(statement),
+        "signature": {
+            "kind": "ssh",
+            "namespace": _SSH_NAMESPACE,
+            "value": signature,
+        },
+    }
+
+
+def _bind_statement_to_review(
+    statement: dict[str, Any], review: dict[str, object]
+) -> None:
+    review_bytes = canonical_packet_bytes(review)
+    expected = {
+        "review_sha256": hashlib.sha256(review_bytes).hexdigest(),
+        "candidate_digest": review["candidate_digest"],
+        "source_sha": review["source_sha"],
+        "provider": review["provider"],
+        "destination": review["destination"],
+    }
+    if any(statement.get(key) != value for key, value in expected.items()):
+        raise ApprovalPacketError("signed approval does not match candidate review")
+
+
+def verify_signed_approval_ssh(
+    signed: dict[str, Any], *, review: dict[str, object], allowed_signers: str | Path
+) -> dict[str, str]:
+    if signed.get("api_version") != "shipyard.signed-approval/v1":
+        raise ApprovalPacketError("signed approval api_version is invalid")
+    statement = signed.get("statement")
+    signature = signed.get("signature")
+    if not isinstance(statement, dict) or not isinstance(signature, dict):
+        raise ApprovalPacketError("signed approval statement and signature are required")
+    encoded = canonical_approval_bytes(statement)
+    _bind_statement_to_review(statement, review)
+    if signature.get("kind") != "ssh" or signature.get("namespace") != _SSH_NAMESPACE:
+        raise ApprovalPacketError("signed approval SSH signature metadata is invalid")
+    value = signature.get("value")
+    if not isinstance(value, str) or not value:
+        raise ApprovalPacketError("signed approval SSH signature is missing")
+    try:
+        signature_bytes = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ApprovalPacketError("signed approval SSH signature is malformed") from exc
+    signers = _regular_path(allowed_signers, "allowed signers file")
+    executable = resolve_executable("ssh-keygen", Path.cwd())
+    with tempfile.TemporaryDirectory(prefix="shipyard-approval-verify-") as temporary:
+        root = Path(temporary)
+        signers_snapshot = root / "allowed-signers"
+        signature_path = root / "approval.sig"
+        signers_snapshot.write_bytes(signers.read_bytes())
+        signature_path.write_bytes(signature_bytes)
+        os.chmod(signers_snapshot, 0o600)
+        os.chmod(signature_path, 0o600)
+        completed = subprocess.run(  # noqa: S603
+            (
+                str(executable),
+                "-Y",
+                "verify",
+                "-f",
+                str(signers_snapshot),
+                "-I",
+                statement["actor"],
+                "-n",
+                _SSH_NAMESPACE,
+                "-s",
+                str(signature_path),
+            ),
+            env=sanitized_environment(),
+            input=encoded,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise ApprovalPacketError("SSH approval signature verification failed")
+    return {key: str(value) for key, value in statement.items()}
