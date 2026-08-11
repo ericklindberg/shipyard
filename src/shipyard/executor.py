@@ -551,6 +551,31 @@ class ReleaseExecutor:
             return "failed", 1, digest, evidence[-4000:]
         return "uncertain", None, digest, evidence[-4000:]
 
+    def readback_once(self, run_id: str) -> ProviderReadback:
+        """Perform one authoritative provider read without changing run or audit state."""
+        with self.ledger.lock_run(run_id):
+            run = self.ledger.get_run(run_id)
+            step = next(
+                (
+                    candidate
+                    for candidate in run.steps
+                    if candidate.effect == "external" and candidate.status == "uncertain"
+                ),
+                None,
+            )
+            if step is None or not step.action:
+                raise UncertainOutcomeError(
+                    "no typed uncertain adapter operation is available for readback"
+                )
+            receipt = self.ledger.get_adapter_receipt(run_id, step.ordinal)
+            if receipt is None:
+                raise UncertainOutcomeError(
+                    "adapter operation has no durable receipt; manual provider "
+                    "reconciliation is required"
+                )
+            adapter = self.adapters.get(step.action)
+            return adapter.readback(self._adapter_context(run, step), receipt)
+
     def resolve(self, run_id: str) -> ReleaseRun:
         with self.ledger.lock_run(run_id):
             run = self.ledger.get_run(run_id)

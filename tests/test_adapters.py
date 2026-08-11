@@ -767,6 +767,7 @@ def test_typed_adapter_run_quarantines_pending_then_resolves_read_only(
 ):
     ledger = Ledger(tmp_path / "state")
     adapter = SequenceAdapter()
+    adapter.readbacks = ["pending", "succeeded", "succeeded"]
     executor = ReleaseExecutor(ledger, AdapterRegistry([adapter]))
     prepared = executor.start(git_repo, load_playbook(typed_playbook(tmp_path)))
 
@@ -780,6 +781,16 @@ def test_typed_adapter_run_quarantines_pending_then_resolves_read_only(
     )
     assert uncertain.status == "uncertain"
     assert uncertain.steps[0].operation_id == "dep-1"
+
+    events_before = ledger.list_audit_events(prepared.run_id)
+    observed = executor.readback_once(prepared.run_id)
+    still_uncertain = ledger.get_run(prepared.run_id)
+
+    assert observed.status == "succeeded"
+    assert observed.observed_sha == prepared.source_sha
+    assert still_uncertain.status == "uncertain"
+    assert still_uncertain.steps[0].provider_status == "pending"
+    assert ledger.list_audit_events(prepared.run_id) == events_before
 
     resolved = executor.resolve(prepared.run_id)
     assert resolved.status == "succeeded"

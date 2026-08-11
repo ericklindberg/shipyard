@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import secrets
+import shutil
 import stat
 import sys
 from contextlib import suppress
@@ -12,6 +13,7 @@ from typing import Any
 
 from .adapters.base import AdapterError
 from .adapters.registry import AdapterRegistry
+from .bootstrap import BootstrapBundle, BootstrapInputError, plan_github_bootstrap
 from .candidate import CandidateError
 from .connections import (
     ConnectionError,
@@ -33,7 +35,10 @@ from .identity import package_version, runtime_identity
 from .ledger import Ledger, LedgerError
 from .models import ReleaseRun, RepositorySnapshot
 from .playbook import PlaybookError, load_playbook
+from .quickstart import QuickstartError, run_quickstart
+from .reports import load_verified_report, render_html, render_markdown
 from .runtime import RuntimeIdentityError
+from .wait import WaitState, wait_for_reconciliation
 from .web import create_server
 
 
@@ -230,6 +235,38 @@ def _write_private_text(path: str | Path, content: str, *, force: bool) -> Path:
             os.close(directory_fd)
 
 
+def _write_bootstrap_bundle(bundle: BootstrapBundle, output_dir: str | Path) -> list[Path]:
+    root = Path(output_dir).expanduser()
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise PlaybookError("bootstrap output must be a directory")
+    existed = root.exists()
+    if existed and any(root.iterdir()):
+        raise PlaybookError("bootstrap output directory must be empty")
+    created_files: list[Path] = []
+    try:
+        if not existed:
+            root.mkdir(parents=True, mode=0o700)
+        for relative, content in sorted(bundle.files.items()):
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            created_files.append(_write_private_text(destination, content, force=False))
+        return created_files
+    except Exception:
+        if not existed:
+            shutil.rmtree(root, ignore_errors=True)
+        else:
+            for path in reversed(created_files):
+                path.unlink(missing_ok=True)
+            for directory in sorted(
+                (path for path in root.rglob("*") if path.is_dir()),
+                key=lambda path: len(path.parts),
+                reverse=True,
+            ):
+                with suppress(OSError):
+                    directory.rmdir()
+        raise
+
+
 def _result_code(run: ReleaseRun) -> int:
     if run.status == "succeeded":
         return 0
@@ -391,6 +428,30 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"shipyard {package_version()}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    quickstart_parser = subparsers.add_parser(
+        "quickstart", help="Run a credential-free governed local release demonstration"
+    )
+    quickstart_parser.add_argument("directory", nargs="?", default="shipyard-quickstart")
+    quickstart_parser.add_argument("--json", action="store_true")
+
+    bootstrap_parser = subparsers.add_parser(
+        "bootstrap", help="Generate safe integration files without network access"
+    )
+    bootstrap_subparsers = bootstrap_parser.add_subparsers(
+        dest="bootstrap_command", required=True
+    )
+    github_bootstrap = bootstrap_subparsers.add_parser(
+        "github-actions", help="Generate an exact-source GitHub workflow and playbook"
+    )
+    github_bootstrap.add_argument("owner")
+    github_bootstrap.add_argument("repo")
+    github_bootstrap.add_argument("source_sha")
+    github_bootstrap.add_argument("--repository-id", required=True)
+    github_bootstrap.add_argument("--workflow-id", required=True)
+    github_bootstrap.add_argument("--workflow-file", default="shipyard.yml")
+    github_bootstrap.add_argument("--output-dir", required=True)
+    github_bootstrap.add_argument("--json", action="store_true")
+
     connection_parser = subparsers.add_parser(
         "connection", help="Manage private per-user provider connections"
     )
@@ -499,6 +560,15 @@ def _build_parser() -> argparse.ArgumentParser:
     resolve_parser.add_argument("--state-dir", default=str(_default_state_dir()))
     resolve_parser.add_argument("--json", action="store_true")
 
+    wait_parser = subparsers.add_parser(
+        "wait", help="Poll provider readback without reconciling or continuing the run"
+    )
+    wait_parser.add_argument("run_id")
+    wait_parser.add_argument("--state-dir", default=str(_default_state_dir()))
+    wait_parser.add_argument("--timeout", type=float, default=300.0)
+    wait_parser.add_argument("--interval", type=float, default=5.0)
+    wait_parser.add_argument("--json", action="store_true")
+
     status_parser = subparsers.add_parser("status", help="Read back a persisted run")
     status_parser.add_argument("run_id")
     status_parser.add_argument("--state-dir", default=str(_default_state_dir()))
@@ -527,6 +597,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     evidence_verify.add_argument("bundle")
     evidence_verify.add_argument("--json", action="store_true")
+    evidence_report = evidence_subparsers.add_parser(
+        "report", help="Render a verified bundle as static Markdown or HTML"
+    )
+    evidence_report.add_argument("bundle")
+    evidence_report.add_argument("--format", choices=["markdown", "html"], default="markdown")
+    evidence_report.add_argument("--output")
+    evidence_report.add_argument("--force", action="store_true")
+    evidence_report.add_argument("--json", action="store_true")
 
     adapters_parser = subparsers.add_parser("adapters", help="List typed adapter actions")
     adapters_parser.add_argument("--json", action="store_true")
@@ -552,6 +630,49 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "quickstart":
+            summary = run_quickstart(args.directory)
+            payload = {
+                "destination": str(summary.destination),
+                "run_id": summary.run_id,
+                "status": summary.status,
+                "candidate_digest": summary.candidate_digest,
+                "source_sha": summary.source_sha,
+                "remote_sha": summary.remote_sha,
+                "remote_url": summary.remote_url,
+                "evidence_path": str(summary.evidence_path),
+                "evidence_verified": summary.evidence_verified,
+                "verdict": summary.verdict,
+            }
+            if args.json:
+                _print(payload, as_json=True)
+            else:
+                print(f"Shipyard quickstart: {summary.status}")
+                print(f"Source: {summary.source_sha}")
+                print(f"Candidate: {summary.candidate_digest}")
+                print(f"Evidence: {summary.evidence_path}")
+            return 0
+        if args.command == "bootstrap":
+            bundle = plan_github_bootstrap(
+                args.owner,
+                args.repo,
+                args.source_sha,
+                repository_id=args.repository_id,
+                workflow_id=args.workflow_id,
+                workflow_file=args.workflow_file,
+            )
+            created = _write_bootstrap_bundle(bundle, args.output_dir)
+            _print(
+                {
+                    "target": f"{bundle.owner}/{bundle.repo}",
+                    "source_sha": bundle.source_sha,
+                    "created": [str(path) for path in created],
+                    "network_used": False,
+                    "provider_mutation": False,
+                },
+                as_json=args.json,
+            )
+            return 0
         if args.command == "connection":
             store = ConnectionStore(args.config_dir)
             operation = args.connection_command
@@ -672,6 +793,33 @@ def main(argv: list[str] | None = None) -> int:
                     as_json=args.json,
                 )
                 return 0
+            if args.evidence_command == "report":
+                verified = load_verified_report(args.bundle)
+                content = (
+                    render_markdown(verified)
+                    if args.format == "markdown"
+                    else render_html(verified)
+                )
+                destination = None
+                if args.output:
+                    destination = _write_private_text(
+                        args.output, content, force=args.force
+                    )
+                payload = {
+                    "bundle": str(Path(args.bundle).expanduser()),
+                    "format": args.format,
+                    "output": str(destination) if destination else None,
+                    "valid": verified.get("valid") is True,
+                }
+                if args.json:
+                    if destination is None:
+                        payload["report"] = content
+                    _print(payload, as_json=True)
+                elif destination is None:
+                    print(content, end="")
+                else:
+                    _print(payload, as_json=False)
+                return 0 if payload["valid"] else 1
             payload = verify_evidence_bundle(args.bundle)
             _print(payload, as_json=args.json)
             return 0 if payload["valid"] else 1
@@ -690,6 +838,33 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         ledger = Ledger(args.state_dir)
+        if args.command == "wait":
+            executor = ReleaseExecutor(ledger)
+            result = wait_for_reconciliation(
+                lambda: executor.readback_once(args.run_id),
+                timeout=args.timeout,
+                interval=args.interval,
+            )
+            readback = result.last_value
+            payload = {
+                "run_id": args.run_id,
+                "state": result.state.value,
+                "polls": result.polls,
+                "last_status": result.last_status,
+                "operation_id": getattr(readback, "operation_id", None),
+                "observed_sha": getattr(readback, "observed_sha", None),
+                "reconciled": False,
+                "next_step": f"shipyard resolve {args.run_id} --state-dir {args.state_dir}",
+            }
+            if args.json:
+                _print(payload, as_json=True)
+            else:
+                print(f"Run: {args.run_id}")
+                print(f"Observed provider state: {result.state.value}")
+                print("Ledger unchanged; use the explicit resolve command to reconcile.")
+            if result.state is WaitState.SUCCEEDED:
+                return 0
+            return 1 if result.state is WaitState.FAILED else 4
         if args.command == "run":
             run = ReleaseExecutor(ledger).start(
                 args.repo,
@@ -726,6 +901,7 @@ def main(argv: list[str] | None = None) -> int:
         AdapterError,
         AuthorizationError,
         CandidateError,
+        BootstrapInputError,
         ConnectionError,
         EvidenceError,
         GitError,
@@ -733,6 +909,7 @@ def main(argv: list[str] | None = None) -> int:
         PlaybookError,
         ProcessInterrupted,
         ProvenanceDriftError,
+        QuickstartError,
         RuntimeIdentityError,
         ValueError,
     ) as exc:
