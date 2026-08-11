@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_public_adoption_governance_files_are_present() -> None:
     required = (
         "ROADMAP.md",
+        "docs/ADOPTION.md",
         ".github/ISSUE_TEMPLATE/bug.yml",
         ".github/ISSUE_TEMPLATE/feature.yml",
         ".github/ISSUE_TEMPLATE/adapter.yml",
@@ -38,3 +39,23 @@ def test_issue_forms_route_security_reports_privately() -> None:
         text = (ROOT / ".github" / "ISSUE_TEMPLATE" / name).read_text(encoding="utf-8")
         assert "contact_links" not in text
         assert "private vulnerability" in text.lower()
+
+
+def test_adoption_guide_covers_current_operator_surface() -> None:
+    guide = (ROOT / "docs" / "ADOPTION.md").read_text(encoding="utf-8")
+
+    for contract in (
+        "shipyard quickstart",
+        "shipyard bootstrap github-actions",
+        "shipyard evidence report",
+        "shipyard wait",
+        "shipyard approval export",
+        "approval_quorum",
+        "xcodecloud.build",
+        "appstoreconnect.testflight",
+        "oci.promote",
+        "kubernetes.deploy",
+        "org.opencontainers.image.revision",
+        "No live provider validation",
+    ):
+        assert contract in guide

@@ -180,26 +180,14 @@ action = "{action}"
     assert load_playbook(path).steps[0].action == action
 
 
-def _write_digest_native_chain(path, *, kubernetes_digest: str) -> None:
+def test_kubernetes_action_is_source_bound_without_multi_destination_chain(tmp_path):
+    path = tmp_path / "kubernetes.toml"
     path.write_text(
         f'''schema_version = 2
-name = "digest-native-chain"
+name = "kubernetes-release"
 target = "production"
-provider = "digest-native"
+provider = "kubernetes"
 destination = "prod-cluster:production:web:web"
-
-[[steps]]
-id = "promote"
-name = "Promote image"
-effect = "external"
-action = "oci.promote"
-
-[steps.config]
-registry = "registry.example.com"
-repository = "team/app"
-manifest_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-target_tag = "stable"
-token_env = "OCI_REGISTRY_TOKEN"
 
 [[steps]]
 id = "deploy"
@@ -216,31 +204,19 @@ deployment = "web"
 deployment_uid = "deployment-uid"
 container = "web"
 image_repository = "registry.example.com/team/app"
-manifest_digest = "{kubernetes_digest}"
+manifest_digest = "sha256:{'b' * 64}"
+registry = "registry.example.com"
+repository = "team/app"
+registry_token_env = "OCI_REGISTRY_TOKEN"
 token_env = "KUBERNETES_API_TOKEN"
 ''',
         encoding="utf-8",
     )
 
+    playbook = load_playbook(path)
 
-def test_kubernetes_action_requires_matching_preceding_oci_promotion(tmp_path):
-    valid = tmp_path / "valid-chain.toml"
-    digest = "sha256:" + "b" * 64
-    _write_digest_native_chain(valid, kubernetes_digest=digest)
-
-    playbook = load_playbook(valid)
-
-    assert [step.action for step in playbook.steps] == [
-        "oci.promote",
-        "kubernetes.deploy",
-    ]
-
-    mismatched = tmp_path / "mismatched-chain.toml"
-    _write_digest_native_chain(
-        mismatched, kubernetes_digest="sha256:" + "c" * 64
-    )
-    with pytest.raises(PlaybookError, match="preceding matching oci.promote"):
-        load_playbook(mismatched)
+    assert playbook.steps[0].action == "kubernetes.deploy"
+    assert playbook.steps[0].config["registry_token_env"] == "OCI_REGISTRY_TOKEN"
 
 
 def test_typed_apple_action_rejects_cross_provider_credential_reference(tmp_path):

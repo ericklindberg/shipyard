@@ -41,6 +41,16 @@ uv run ty check src
 uv build
 ```
 
+Prove the complete governed path without credentials or network access:
+
+```bash
+shipyard quickstart ./shipyard-quickstart --json
+```
+
+This creates disposable local Git repositories, prepares and approves an exact
+candidate, performs one real local ref mutation, reads it back independently,
+exports evidence, and verifies that evidence offline.
+
 ## Five-minute workflow
 
 Configure a reusable, per-user connection without storing its credential value:
@@ -94,6 +104,7 @@ Read or reconcile state:
 
 ```bash
 shipyard status RUN_ID --json
+shipyard wait RUN_ID --timeout 300 --interval 5 --json
 shipyard resolve RUN_ID --json
 shipyard list --json
 shipyard adapters --json
@@ -111,8 +122,12 @@ Schema version 2 is the production path. It forbids raw external argv and routes
 - `render.deploy` — exact commit deployment and deploy readback;
 - `heroku.build` — source-blob build with version readback;
 - `vercel.deploy` — exact Git SHA deployment and deployment readback.
+- `xcodecloud.build` — candidate-tag-bound Xcode Cloud dispatch and source-commit readback;
+- `appstoreconnect.testflight` — identity-bound TestFlight build/group adoption and readback;
+- `oci.promote` — exact manifest/config/source verification, one tag PUT, and digest readback;
+- `kubernetes.deploy` — independent OCI source verification plus UID/resourceVersion-bound immutable-image rollout.
 
-`git.ref` and `github.workflow` are the release-dogfooded paths. The remaining typed adapters have deterministic fake-provider contracts but require live sandbox evidence before a production-readiness claim.
+`git.ref` and `github.workflow` are the release-dogfooded paths. The remaining typed adapters have deterministic fake-provider contracts but require live sandbox evidence before a production-readiness claim. Apple, OCI, and Kubernetes remain beta and do not carry a live-provider validation claim.
 
 Use `shipyard connection add`, `check`, and `playbook` for reusable per-user onboarding, or `shipyard init PROVIDER` to generate an unconfigured provider example. Connection profiles and playbooks store environment-variable names, never values. See [Per-user service connections](docs/CONNECTIONS.md).
 
@@ -124,7 +139,7 @@ Shipyard does not replace GitHub Actions. It makes a reviewed GitHub workflow on
 
 Start with the non-mutating contract in [`examples/github-actions/release.yml`](examples/github-actions/release.yml). Shipyard extends that contract in [its active dogfood workflow](.github/workflows/shipyard-contract.yml) with the complete locked test, static-analysis, security, dependency-audit, build, SBOM, checksum, and artifact gate. Both declare the two inputs Shipyard sends and reject a workflow event whose `GITHUB_SHA` differs from the approved candidate. Add your own build, signing, TestFlight, package, or infrastructure jobs after the identity gate, using pinned actions and provider-native protections.
 
-This is the practical boundary: GitHub remains the build/CI environment; Shipyard controls which exact source may enter a release workflow and records what GitHub says happened. Shipyard does not yet prove App Store Connect/TestFlight adoption; that requires a future artifact-to-store identity adapter rather than trusting a green GitHub run alone.
+This is the practical boundary: GitHub remains the build/CI environment; Shipyard controls which exact source may enter a release workflow and records what GitHub says happened. Typed Apple adapters can separately prove Xcode Cloud source-commit identity and TestFlight build/group adoption, but they remain beta pending disposable live-provider validation.
 
 ## State model
 
@@ -148,6 +163,7 @@ Export a governed run, its canonical manifest projection, provider receipt/readb
 ```bash
 shipyard evidence export RUN_ID --output shipyard-evidence.tar --json
 shipyard evidence verify shipyard-evidence.tar --json
+shipyard evidence report shipyard-evidence.tar --format html --output report.html --json
 ```
 
 Verification is offline and does not need the original ledger, checkout, credentials, or provider. It checks the evidence schema, canonical record digest, candidate/approval/source identity, audit chain, operation receipts and semantic readback, archive safety, and every artifact byte against its approved SHA-256 digest. The bundle is self-verifying but not signed; use authenticated transport or external provenance when third parties must establish who supplied it. See [Portable evidence](docs/EVIDENCE.md).
@@ -188,6 +204,7 @@ Read [SECURITY.md](SECURITY.md) for the threat model and reporting process. Impo
 - [Exact-SHA release and provenance process](docs/RELEASING.md)
 - [Adapter contract and roadmap](docs/ADAPTERS.md)
 - [Portable offline evidence](docs/EVIDENCE.md)
+- [Adoption guide: quickstart, signed approvals, Apple, OCI, and Kubernetes](docs/ADOPTION.md)
 - [MVP acceptance contract](docs/MVP.md)
 
 Licensed under the [MIT License](LICENSE).

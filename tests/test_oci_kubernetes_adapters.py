@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 
@@ -12,6 +12,44 @@ from shipyard.adapters.oci import OciPromotionAdapter
 from shipyard.adapters.raw_http import RawHttpResponse, UrllibRawTransport
 
 SHA = "a" * 40
+SOURCE_CONFIG = json.dumps(
+    {"config": {"Labels": {"org.opencontainers.image.revision": SHA}}},
+    separators=(",", ":"),
+).encode()
+SOURCE_CONFIG_DIGEST = f"sha256:{hashlib.sha256(SOURCE_CONFIG).hexdigest()}"
+SOURCE_MANIFEST = json.dumps(
+    {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": SOURCE_CONFIG_DIGEST,
+            "size": len(SOURCE_CONFIG),
+        },
+        "layers": [],
+    },
+    separators=(",", ":"),
+).encode()
+SOURCE_DIGEST = f"sha256:{hashlib.sha256(SOURCE_MANIFEST).hexdigest()}"
+
+
+def _source_image_responses() -> list[RawHttpResponse]:
+    return [
+        RawHttpResponse(200, {"docker-content-digest": SOURCE_DIGEST}, b""),
+        RawHttpResponse(
+            200,
+            {
+                "docker-content-digest": SOURCE_DIGEST,
+                "content-type": "application/vnd.oci.image.manifest.v1+json",
+            },
+            SOURCE_MANIFEST,
+        ),
+        RawHttpResponse(
+            200,
+            {"content-type": "application/vnd.oci.image.config.v1+json"},
+            SOURCE_CONFIG,
+        ),
+    ]
 
 
 @dataclass
@@ -258,7 +296,6 @@ def _deployment(
 
 
 def _kubernetes_context() -> AdapterContext:
-    digest = f"sha256:{'b' * 64}"
     return AdapterContext(
         run_id="run-1",
         source_sha=SHA,
@@ -273,7 +310,10 @@ def _kubernetes_context() -> AdapterContext:
             "deployment_uid": "deployment-uid",
             "container": "web",
             "image_repository": "registry.example.com/team/app",
-            "manifest_digest": digest,
+            "manifest_digest": SOURCE_DIGEST,
+            "registry": "registry.example.com",
+            "repository": "team/app",
+            "registry_token_env": "OCI_REGISTRY_TOKEN",
             "token_env": "KUBERNETES_API_TOKEN",
         },
     )
@@ -281,12 +321,14 @@ def _kubernetes_context() -> AdapterContext:
 
 def test_kubernetes_deployment_patches_exact_digest_once_and_verifies_rollout(monkeypatch):
     monkeypatch.setenv("KUBERNETES_API_TOKEN", "synthetic-token")
+    monkeypatch.setenv("OCI_REGISTRY_TOKEN", "synthetic-registry-token")
     context = _kubernetes_context()
     expected_image = (
         f"{context.config['image_repository']}@{context.config['manifest_digest']}"
     )
     transport = FakeRawTransport(
-        [
+        _source_image_responses()
+        + [
             _raw_json(_namespace()),
             _raw_json(_deployment()),
             _raw_json(_deployment(image=expected_image, generation=8, observed_generation=7)),
@@ -299,19 +341,22 @@ def test_kubernetes_deployment_patches_exact_digest_once_and_verifies_rollout(mo
     readback = adapter.readback(context, receipt)
 
     assert [request["method"] for request in transport.requests] == [
+        "HEAD",
+        "GET",
+        "GET",
         "GET",
         "GET",
         "PATCH",
         "GET",
     ]
-    encoded_patch = transport.requests[2]["body"]
+    encoded_patch = transport.requests[5]["body"]
     assert isinstance(encoded_patch, bytes)
     patch = json.loads(encoded_patch)
     assert patch["metadata"]["resourceVersion"] == "42"
     assert patch["spec"]["template"]["spec"]["containers"] == [
         {"name": "web", "image": expected_image}
     ]
-    assert transport.requests[2]["content_type"] == (
+    assert transport.requests[5]["content_type"] == (
         "application/strategic-merge-patch+json"
     )
     assert receipt.evidence["image"] == expected_image
@@ -321,6 +366,7 @@ def test_kubernetes_deployment_patches_exact_digest_once_and_verifies_rollout(mo
 
 def test_kubernetes_deployment_returns_pending_until_rollout_is_observed(monkeypatch):
     monkeypatch.setenv("KUBERNETES_API_TOKEN", "synthetic-token")
+    monkeypatch.setenv("OCI_REGISTRY_TOKEN", "synthetic-registry-token")
     context = _kubernetes_context()
     expected_image = (
         f"{context.config['image_repository']}@{context.config['manifest_digest']}"
@@ -339,6 +385,7 @@ def test_kubernetes_deployment_returns_pending_until_rollout_is_observed(monkeyp
 
 def test_kubernetes_readback_fails_closed_on_deployment_uid_drift(monkeypatch):
     monkeypatch.setenv("KUBERNETES_API_TOKEN", "synthetic-token")
+    monkeypatch.setenv("OCI_REGISTRY_TOKEN", "synthetic-registry-token")
     context = _kubernetes_context()
     expected_image = (
         f"{context.config['image_repository']}@{context.config['manifest_digest']}"
@@ -354,6 +401,7 @@ def test_kubernetes_readback_fails_closed_on_deployment_uid_drift(monkeypatch):
 
 def test_kubernetes_scale_zero_rollout_reconciles_exact_observed_image(monkeypatch):
     monkeypatch.setenv("KUBERNETES_API_TOKEN", "synthetic-token")
+    monkeypatch.setenv("OCI_REGISTRY_TOKEN", "synthetic-registry-token")
     context = _kubernetes_context()
     expected_image = (
         f"{context.config['image_repository']}@{context.config['manifest_digest']}"
@@ -380,14 +428,38 @@ def test_kubernetes_scale_zero_rollout_reconciles_exact_observed_image(monkeypat
 
 def test_kubernetes_deployment_refuses_uid_drift_before_patch(monkeypatch):
     monkeypatch.setenv("KUBERNETES_API_TOKEN", "synthetic-token")
+    monkeypatch.setenv("OCI_REGISTRY_TOKEN", "synthetic-registry-token")
     transport = FakeRawTransport(
-        [_raw_json(_namespace()), _raw_json(_deployment(uid="different-uid"))]
+        _source_image_responses()
+        + [_raw_json(_namespace()), _raw_json(_deployment(uid="different-uid"))]
     )
 
     with pytest.raises(AdapterError, match="deployment identity"):
         KubernetesDeploymentAdapter(transport).execute(_kubernetes_context())
 
-    assert [request["method"] for request in transport.requests] == ["GET", "GET"]
+    assert [request["method"] for request in transport.requests] == [
+        "HEAD",
+        "GET",
+        "GET",
+        "GET",
+        "GET",
+    ]
+
+
+def test_kubernetes_refuses_unbound_oci_source_before_cluster_read(monkeypatch):
+    monkeypatch.setenv("KUBERNETES_API_TOKEN", "synthetic-token")
+    monkeypatch.setenv("OCI_REGISTRY_TOKEN", "synthetic-registry-token")
+    context = replace(_kubernetes_context(), source_sha="c" * 40)
+    transport = FakeRawTransport(_source_image_responses())
+
+    with pytest.raises(AdapterError, match="source revision"):
+        KubernetesDeploymentAdapter(transport).execute(context)
+
+    assert [request["method"] for request in transport.requests] == [
+        "HEAD",
+        "GET",
+        "GET",
+    ]
 
 
 @pytest.mark.parametrize(

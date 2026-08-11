@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from urllib.parse import quote, urlsplit
 
 from .base import AdapterContext, AdapterError, ConnectionCheck, MutationReceipt, ProviderReadback
+from .oci import OciPromotionAdapter
 from .raw_http import RawHttpResponse, RawHttpTransport, UrllibRawTransport
 
 _NAME = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
@@ -33,6 +34,9 @@ class _Coordinates:
     container: str
     image_repository: str
     manifest_digest: str
+    registry: str
+    repository: str
+    registry_token_env: str
     token_env: str
 
     @property
@@ -94,6 +98,9 @@ class KubernetesDeploymentAdapter:
             container=cls._config_string(context, "container"),
             image_repository=cls._config_string(context, "image_repository"),
             manifest_digest=cls._config_string(context, "manifest_digest"),
+            registry=cls._config_string(context, "registry"),
+            repository=cls._config_string(context, "repository"),
+            registry_token_env=cls._config_string(context, "registry_token_env"),
             token_env=cls._config_string(context, "token_env"),
         )
         if _CLUSTER.fullmatch(coordinates.cluster_id) is None:
@@ -116,8 +123,21 @@ class KubernetesDeploymentAdapter:
             or "@" in coordinates.image_repository
         ):
             raise AdapterError("kubernetes.deploy image repository is invalid")
+        if coordinates.image_repository != (
+            f"{coordinates.registry}/{coordinates.repository}"
+        ):
+            raise AdapterError(
+                "kubernetes.deploy image_repository must equal registry/repository"
+            )
         if _DIGEST.fullmatch(coordinates.manifest_digest) is None:
             raise AdapterError("kubernetes.deploy requires an exact sha256 manifest digest")
+        if (
+            _ENV.fullmatch(coordinates.registry_token_env) is None
+            or not coordinates.registry_token_env.startswith("OCI_")
+        ):
+            raise AdapterError(
+                "kubernetes.deploy registry_token_env must use an OCI_ variable"
+            )
         if (
             _ENV.fullmatch(coordinates.token_env) is None
             or not coordinates.token_env.startswith("KUBERNETES_")
@@ -183,6 +203,23 @@ class KubernetesDeploymentAdapter:
     ) -> tuple[_Coordinates, dict[str, str], dict[str, object]]:
         coordinates = self._coordinates(context)
         headers = self._headers(coordinates)
+        source_context = AdapterContext(
+            run_id=context.run_id,
+            source_sha=context.source_sha,
+            provider="oci",
+            destination=(
+                f"{coordinates.registry}/{coordinates.repository}:"
+                "shipyard-source-verification"
+            ),
+            config={
+                "registry": coordinates.registry,
+                "repository": coordinates.repository,
+                "manifest_digest": coordinates.manifest_digest,
+                "target_tag": "shipyard-source-verification",
+                "token_env": coordinates.registry_token_env,
+            },
+        )
+        OciPromotionAdapter(self.transport).check(source_context)
         namespace = self._json(
             self.transport.request(
                 "GET", coordinates.namespace_url, headers=headers

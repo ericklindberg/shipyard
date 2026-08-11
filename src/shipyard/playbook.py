@@ -629,7 +629,11 @@ def _validate_adapter_config(action: str, config: dict[str, Any], step_id: str) 
             raise PlaybookError(
                 f"config value {key} for {step_id} must be string, int, or bool"
             )
-        prefix = _ACTION_ENV_PREFIX.get(action)
+        prefix = (
+            "OCI_"
+            if action == "kubernetes.deploy" and lowered == "registry_token_env"
+            else _ACTION_ENV_PREFIX.get(action)
+        )
         if (
             lowered.endswith("_env")
             and prefix is not None
@@ -764,28 +768,6 @@ def _parse_steps(raw_steps: list[Any], schema_version: Any) -> tuple[Step, ...]:
     return tuple(_parse_step(raw_step, schema_version, seen) for raw_step in raw_steps)
 
 
-def _validate_digest_native_chain(steps: tuple[Step, ...]) -> None:
-    for ordinal, step in enumerate(steps):
-        if step.action != "kubernetes.deploy":
-            continue
-        image_repository = step.config.get("image_repository")
-        manifest_digest = step.config.get("manifest_digest")
-        matched = any(
-            previous.action == "oci.promote"
-            and isinstance(previous.config.get("registry"), str)
-            and isinstance(previous.config.get("repository"), str)
-            and f"{previous.config['registry']}/{previous.config['repository']}"
-            == image_repository
-            and previous.config.get("manifest_digest") == manifest_digest
-            for previous in steps[:ordinal]
-        )
-        if not matched:
-            raise PlaybookError(
-                f"kubernetes.deploy step {step.id} requires a preceding matching "
-                "oci.promote step for the same image repository and digest"
-            )
-
-
 def load_playbook(path: str | Path) -> Playbook:
     playbook_path, raw_bytes, data = _read_playbook_document(path)
     schema, name, target, provider, destination, allow_dirty, raw_steps = (
@@ -794,7 +776,6 @@ def load_playbook(path: str | Path) -> Playbook:
     artifacts = _parse_artifacts(data)
     approval_quorum = _parse_approval_quorum(data)
     steps = _parse_steps(raw_steps, schema)
-    _validate_digest_native_chain(steps)
     if allow_dirty and any(step.effect == "external" for step in steps):
         raise PlaybookError("external steps require a clean source; allow_dirty must be false")
     return Playbook(
