@@ -130,6 +130,22 @@ class GitRefAdapter:
             result[fields[1]] = fields[0]
         return result
 
+    @staticmethod
+    def _credential_free_remote_url(output: str) -> str:
+        urls = [line.strip() for line in output.splitlines() if line.strip()]
+        if len(urls) != 1:
+            raise AdapterError("git.ref requires exactly one configured remote URL")
+        remote_url = urls[0]
+        parsed = urlsplit(remote_url)
+        if parsed.scheme in {"http", "https"} and (
+            parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise AdapterError("git.ref requires a credential-free HTTP(S) remote")
+        return remote_url
+
     @contextmanager
     def _buzz_command_prefix(
         self, context: AdapterContext, remote: str, repo: Path
@@ -204,7 +220,7 @@ class GitRefAdapter:
         tag_kind = self._tag_kind(context, ref)
         with self._git_command_prefix(context, remote, repo) as command:
             if context.provider != "buzz-git":
-                remote_code, _remote_output = self.runner(
+                remote_code, remote_output = self.runner(
                     (*command, "remote", "get-url", "--", remote),
                     repo,
                     self._allowed_env(context),
@@ -213,6 +229,7 @@ class GitRefAdapter:
                     raise AdapterError(
                         "git connection verification requires a configured named remote"
                     )
+                self._credential_free_remote_url(remote_output)
             code, output = self.runner(
                 (
                     *command,
@@ -298,11 +315,11 @@ class GitRefAdapter:
                 remote_code, remote_output = self.runner(
                     ("git", "remote", "get-url", "--all", remote), repo, ()
                 )
-                remote_urls = [line for line in remote_output.splitlines() if line]
-                if remote_code != 0 or len(remote_urls) != 1:
+                if remote_code != 0:
                     raise AdapterError(
                         "annotated candidate tag requires exactly one configured remote URL"
                     )
+                remote_url = self._credential_free_remote_url(remote_output)
                 with TemporaryDirectory(prefix="shipyard-annotated-tag-") as temporary:
                     clone = Path(temporary) / "repository"
                     commands = [
@@ -317,7 +334,7 @@ class GitRefAdapter:
                             str(clone),
                         ),
                         ("git", "remote", "remove", "origin"),
-                        ("git", "remote", "add", remote, remote_urls[0]),
+                        ("git", "remote", "add", remote, remote_url),
                         (
                             "git",
                             "-c",

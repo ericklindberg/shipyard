@@ -18,7 +18,8 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ### Security
 
-- Annotated candidate-tag mode is restricted to `refs/tags/shipyard-candidate-<exact-source-sha>` on the GitHub provider, never force-pushes, leaves the governed checkout untouched, and requires readback of both the original tag object and peeled approved commit.
+- Annotated candidate-tag mode is restricted to `refs/tags/shipyard-candidate-<exact-source-sha>` on the GitHub provider, rejects credential-bearing HTTP(S) remotes before network access, never force-pushes, leaves the governed checkout untouched, and requires readback of both the original tag object and peeled approved commit.
+- Unexpected or malformed adapter preflight failures terminate before the mutation boundary without persisting untrusted exception contents.
 - Malformed non-null Apple relationship data fails closed instead of falling back to another provider representation.
 
 ## [0.5.1] - 2026-08-11

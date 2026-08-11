@@ -116,6 +116,71 @@ def test_git_ref_adapter_ignores_non_identity_remote_diagnostics(tmp_path):
     assert result.identity == SHA
 
 
+def test_git_ref_adapter_rejects_credential_bearing_https_remote_before_network(
+    tmp_path,
+):
+    calls = []
+
+    def runner(command, cwd, allowed_env):
+        calls.append(command)
+        if command[1:4] == ("remote", "get-url", "--"):
+            return 0, "https://" + "user:secret" + "@example.test/repository.git\n"
+        if command[1] == "ls-remote":
+            return 0, ""
+        raise AssertionError(f"unexpected command: {command}")
+
+    candidate_context = context(
+        "github",
+        {
+            "remote": "origin",
+            "ref": f"refs/tags/shipyard-candidate-{SHA}",
+            "repo_path": str(tmp_path),
+            "tag_kind": "annotated",
+        },
+    )
+
+    with pytest.raises(AdapterError, match="credential-free"):
+        GitRefAdapter(runner=runner).check(candidate_context)
+
+    assert calls == [("git", "remote", "get-url", "--", "origin")]
+
+
+@pytest.mark.parametrize(
+    "remote_url",
+    [
+        "https://example.test/repository.git?access_token=secret",
+        "https://example.test/repository.git#secret",
+    ],
+)
+def test_git_ref_adapter_rejects_http_remote_query_or_fragment_before_network(
+    tmp_path, remote_url
+):
+    calls = []
+
+    def runner(command, cwd, allowed_env):
+        calls.append(command)
+        if command[1:4] == ("remote", "get-url", "--"):
+            return 0, f"{remote_url}\n"
+        if command[1] == "ls-remote":
+            return 0, ""
+        raise AssertionError(f"unexpected command: {command}")
+
+    candidate_context = context(
+        "github",
+        {
+            "remote": "origin",
+            "ref": f"refs/tags/shipyard-candidate-{SHA}",
+            "repo_path": str(tmp_path),
+            "tag_kind": "annotated",
+        },
+    )
+
+    with pytest.raises(AdapterError, match="credential-free"):
+        GitRefAdapter(runner=runner).check(candidate_context)
+
+    assert calls == [("git", "remote", "get-url", "--", "origin")]
+
+
 def test_git_ref_adapter_allows_absent_destination_after_remote_verification(tmp_path):
     def runner(command, cwd, allowed_env):
         if command[1:4] == ("remote", "get-url", "--"):
@@ -717,6 +782,38 @@ def test_git_ref_readback_rejects_unhashable_receipt_metadata_without_remote_acc
     assert commands == []
 
 
+def test_git_ref_annotated_execute_rejects_remote_credential_race_before_clone(
+    tmp_path,
+):
+    commands = []
+
+    def runner(command, cwd, allowed_env):
+        commands.append(command)
+        if command[1:4] == ("remote", "get-url", "--"):
+            return 0, "https://example.test/repository.git\n"
+        if command[1] == "ls-remote":
+            return 0, ""
+        if command[1:4] == ("remote", "get-url", "--all"):
+            return 0, "https://" + "user:secret" + "@example.test/repository.git\n"
+        return 1, ""
+
+    ctx = context(
+        "github",
+        {
+            "remote": "origin",
+            "ref": f"refs/tags/shipyard-candidate-{SHA}",
+            "repo_path": str(tmp_path),
+            "tag_kind": "annotated",
+        },
+    )
+
+    with pytest.raises(AdapterError, match="credential-free"):
+        GitRefAdapter(runner=runner).execute(ctx)
+
+    assert not any(command[1] == "clone" for command in commands)
+    assert not any(command[1] == "push" for command in commands)
+
+
 def test_git_ref_adapter_pushes_annotated_candidate_tag_and_reads_back_peeled_sha(
     git_repo, tmp_path
 ):
@@ -1018,6 +1115,52 @@ def test_external_adapter_check_failure_never_crosses_mutation_boundary(
     assert failed.status == "failed"
     assert failed.steps[0].status == "failed"
     assert failed.steps[0].attempts == 1
+    assert adapter.execute_calls == 0
+    assert ledger.get_adapter_receipt(prepared.run_id, 0) is None
+    assert "adapter.check_failed" in event_types
+    assert "adapter.mutation_started" not in event_types
+    assert "adapter.uncertain" not in event_types
+
+
+class BrokenCheckAdapter(SequenceAdapter):
+    def __init__(self, failure_mode: str):
+        super().__init__()
+        self.failure_mode = failure_mode
+        self.execute_calls = 0
+
+    def check(self, context: AdapterContext) -> ConnectionCheck:
+        if self.failure_mode == "exception":
+            raise RuntimeError("synthetic unexpected preflight failure")
+        return object()  # type: ignore[return-value]
+
+    def execute(self, context: AdapterContext) -> MutationReceipt:
+        self.execute_calls += 1
+        return super().execute(context)
+
+
+@pytest.mark.parametrize("failure_mode", ["exception", "malformed"])
+def test_external_adapter_unexpected_check_failure_is_terminal_before_mutation(
+    git_repo, tmp_path, failure_mode
+):
+    ledger = Ledger(tmp_path / "state")
+    adapter = BrokenCheckAdapter(failure_mode)
+    executor = ReleaseExecutor(ledger, AdapterRegistry([adapter]))
+    prepared = executor.start(git_repo, load_playbook(typed_playbook(tmp_path)))
+
+    failed = executor.resume(
+        prepared.run_id,
+        execute_external=True,
+        confirm_sha=prepared.source_sha,
+        approve_candidate=prepared.candidate_digest,
+        approval_actor="pytest-reviewer",
+        approval_reason="unexpected preflight boundary regression",
+    )
+
+    event_types = [
+        event["event_type"] for event in ledger.list_audit_events(prepared.run_id)
+    ]
+    assert failed.status == "failed"
+    assert failed.steps[0].status == "failed"
     assert adapter.execute_calls == 0
     assert ledger.get_adapter_receipt(prepared.run_id, 0) is None
     assert "adapter.check_failed" in event_types

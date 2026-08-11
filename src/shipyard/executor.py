@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .adapters.base import AdapterContext, AdapterError, ProviderReadback
+from .adapters.base import (
+    AdapterContext,
+    AdapterError,
+    ConnectionCheck,
+    ProviderReadback,
+)
 from .adapters.registry import AdapterRegistry
 from .candidate import build_candidate
 from .connections import inspect_buzz_git_auth
@@ -568,15 +573,20 @@ class ReleaseExecutor:
         try:
             check = adapter.check(context)
             if (
-                check.status != "verified"
+                not isinstance(check, ConnectionCheck)
+                or check.status != "verified"
                 or check.provider != context.provider
                 or check.action != step.action
                 or not isinstance(check.identity, str)
                 or not check.identity
             ):
                 raise AdapterError("adapter preflight identity is not verified")
-        except AdapterError as exc:
-            message = redact(str(exc))
+        except Exception as exc:
+            message = (
+                redact(str(exc))
+                if isinstance(exc, AdapterError)
+                else f"adapter preflight failed ({type(exc).__name__})"
+            )
             self.ledger.append_audit_event(
                 run.run_id,
                 "adapter.check_failed",
