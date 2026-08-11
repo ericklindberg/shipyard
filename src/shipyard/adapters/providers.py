@@ -132,6 +132,8 @@ class GitRefAdapter:
             "-c",
             "credential.helper=",
             "-c",
+            f"credential.https://{authority}.helper=",
+            "-c",
             f"credential.https://{authority}.helper=nostr",
             "-c",
             f"credential.https://{authority}.useHttpPath=true",

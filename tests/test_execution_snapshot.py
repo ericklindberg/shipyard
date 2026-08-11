@@ -4,6 +4,8 @@ import hashlib
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -11,7 +13,11 @@ from shipyard.execution_snapshot import (
     ExecutionSnapshotError,
     _copy_approved_artifact,
     _copy_buzz_auth_config,
+    execution_snapshot_run,
+    freeze_execution_snapshot,
 )
+from shipyard.models import ReleaseRun
+from shipyard.safe_files import SafeFileError, copy_private_regular
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -44,7 +50,14 @@ def test_buzz_snapshot_copies_only_safe_credential_references(
         f"https://{host}/git/owner/repository.git",
     )
 
-    assert _git(snapshot, "config", "--get", f"credential.https://{host}.helper") == "nostr"
+    helper_values = subprocess.run(
+        ("git", "config", "--get-all", f"credential.https://{host}.helper"),
+        cwd=snapshot,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert helper_values == ["", "nostr"]
     assert (
         _git(snapshot, "config", "--get", f"credential.https://{host}.useHttpPath")
         == "true"
@@ -113,3 +126,39 @@ def test_artifact_copy_is_anchored_when_parent_path_is_swapped(
     )
 
     assert (snapshot / "safe" / "release.bin").read_bytes() == approved
+
+
+def test_private_copy_rejects_symlinked_destination_parent(tmp_path: Path) -> None:
+    source = tmp_path / "private.key"
+    source.write_text("private", encoding="utf-8")
+    source.chmod(0o600)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    destination_parent = tmp_path / "credentials"
+    destination_parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SafeFileError, match="private destination path is unsafe"):
+        copy_private_regular(source, destination_parent / "nostr.key")
+
+    assert not (outside / "nostr.key").exists()
+
+
+def test_freeze_rejects_symlink_descendants(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "regular").write_text("safe", encoding="utf-8")
+    (snapshot / "link").symlink_to(snapshot / "regular")
+
+    with pytest.raises(ExecutionSnapshotError, match="contains a symlink"):
+        freeze_execution_snapshot(snapshot)
+
+
+def test_recovery_rejects_dangling_snapshot_symlink(tmp_path: Path) -> None:
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
+    (snapshots / "run-1").symlink_to(tmp_path / "missing", target_is_directory=True)
+
+    with pytest.raises(ExecutionSnapshotError, match="path is unsafe"):
+        execution_snapshot_run(
+            tmp_path, cast(ReleaseRun, SimpleNamespace(run_id="run-1"))
+        )

@@ -39,6 +39,7 @@ def test_shipyard_dogfood_workflow_runs_the_complete_exact_sha_gate():
     for required in (
         "workflow_dispatch:",
         "shipyard_candidate_sha:",
+        "shipyard_candidate_tag:",
         "shipyard_run_id:",
         "uv sync --extra dev --locked",
         "uv run pytest -q",
@@ -58,6 +59,12 @@ def test_shipyard_dogfood_workflow_runs_the_complete_exact_sha_gate():
     ):
         assert required in workflow
     assert "0.3.0" not in workflow
+    assert "ref: ${{ inputs.shipyard_candidate_tag }}" in workflow
+    assert 'test "$EXPECTED_TAG" = "shipyard-candidate-$EXPECTED_SHA"' in workflow
+    assert (
+        'test "$(git rev-parse "refs/tags/$EXPECTED_TAG^{commit}")" = "$EXPECTED_SHA"'
+        in workflow
+    )
     assert "deploy" not in workflow.casefold()
     assert "publish" not in workflow.casefold()
 
@@ -116,6 +123,7 @@ def test_release_evidence_workflow_attests_without_publishing():
     workflow = workflow_path.read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow
+    assert "candidate_tag:" in workflow
     assert "id-token: write" in workflow
     assert "attestations: write" in workflow
     assert "actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661" in workflow
@@ -126,6 +134,12 @@ def test_release_evidence_workflow_attests_without_publishing():
     assert "scripts/resolve_release_artifacts.py" in workflow
     assert "SHIPYARD_RUNTIME_SBOM" in workflow
     assert "SHIPYARD_BUILD_SBOM" in workflow
+    assert "ref: ${{ inputs.candidate_tag }}" in workflow
+    assert 'test "$EXPECTED_TAG" = "shipyard-candidate-$EXPECTED_SHA"' in workflow
+    assert (
+        'test "$(git rev-parse "refs/tags/$EXPECTED_TAG^{commit}")" = "$EXPECTED_SHA"'
+        in workflow
+    )
     assert "0.3.0" not in workflow
     assert "twine upload" not in workflow
     assert "uv publish" not in workflow

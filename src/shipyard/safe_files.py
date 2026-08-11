@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import stat
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 
 
@@ -57,6 +58,34 @@ def open_relative_regular(root: Path, relative: str) -> int:
             os.close(descriptor)
 
 
+def _open_absolute_parent(destination: Path) -> tuple[int, str]:
+    if not destination.is_absolute() or destination.name in {"", ".", ".."}:
+        raise SafeFileError("private destination path must be absolute")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current: int | None = None
+    try:
+        current = os.open(Path("/"), directory_flags)
+        parent_parts = destination.parent.relative_to(Path("/")).parts
+        for component in parent_parts:
+            if component in {"", ".", ".."} or "\x00" in component:
+                raise SafeFileError("private destination path is unsafe")
+            child = os.open(component, directory_flags, dir_fd=current)
+            os.close(current)
+            current = child
+            if not stat.S_ISDIR(os.fstat(current).st_mode):
+                raise SafeFileError("private destination parent is not a directory")
+        return current, destination.name
+    except (OSError, ValueError, SafeFileError) as exc:
+        if current is not None:
+            os.close(current)
+        raise SafeFileError("private destination path is unsafe") from exc
+
+
 def copy_private_regular(source: Path, destination: Path) -> None:
     if not source.is_absolute():
         raise SafeFileError("private source path must be absolute")
@@ -66,6 +95,8 @@ def copy_private_regular(source: Path, destination: Path) -> None:
     except (SafeFileError, ValueError) as exc:
         raise SafeFileError("private source file is unsafe") from exc
     destination_descriptor: int | None = None
+    destination_parent_descriptor: int | None = None
+    destination_name = destination.name
     completed = False
     try:
         metadata = os.fstat(source_descriptor)
@@ -75,14 +106,16 @@ def copy_private_regular(source: Path, destination: Path) -> None:
             or bool(stat.S_IMODE(metadata.st_mode) & 0o177)
         ):
             raise SafeFileError("private source file ownership or mode is unsafe")
+        destination_parent_descriptor, destination_name = _open_absolute_parent(destination)
         destination_descriptor = os.open(
-            destination,
+            destination_name,
             os.O_WRONLY
             | os.O_CREAT
             | os.O_EXCL
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NOFOLLOW", 0),
             0o600,
+            dir_fd=destination_parent_descriptor,
         )
         while chunk := os.read(source_descriptor, 64 * 1024):
             view = memoryview(chunk)
@@ -100,5 +133,8 @@ def copy_private_regular(source: Path, destination: Path) -> None:
         os.close(source_descriptor)
         if destination_descriptor is not None:
             os.close(destination_descriptor)
-        if not completed:
-            destination.unlink(missing_ok=True)
+        if not completed and destination_parent_descriptor is not None:
+            with suppress(FileNotFoundError):
+                os.unlink(destination_name, dir_fd=destination_parent_descriptor)
+        if destination_parent_descriptor is not None:
+            os.close(destination_parent_descriptor)

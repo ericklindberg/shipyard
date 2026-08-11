@@ -177,7 +177,8 @@ def _copy_buzz_auth_config(source: Path, snapshot: Path, remote_url: str) -> Non
             "Buzz snapshot requires host-scoped nostr helper and useHttpPath=true"
         )
     _git(snapshot, "config", "--local", "--add", "credential.helper", "")
-    _git(snapshot, "config", "--local", helper_key, "nostr")
+    _git(snapshot, "config", "--local", "--add", helper_key, "")
+    _git(snapshot, "config", "--local", "--add", helper_key, "nostr")
     _git(snapshot, "config", "--local", path_key, "true")
 
     keyfiles = _optional_git_config(source, "nostr.keyfile")
@@ -328,7 +329,9 @@ def _validate_frozen_snapshot(snapshot: Path, source_sha: str) -> None:
         item = path.lstat()
         if hasattr(os, "geteuid") and item.st_uid != os.geteuid():
             raise ExecutionSnapshotError("execution snapshot has an unexpected owner")
-        if not stat.S_ISLNK(item.st_mode) and stat.S_IMODE(item.st_mode) & 0o222:
+        if stat.S_ISLNK(item.st_mode):
+            raise ExecutionSnapshotError("execution snapshot contains a symlink")
+        if stat.S_IMODE(item.st_mode) & 0o222:
             raise ExecutionSnapshotError("pre-existing execution snapshot is not frozen")
     if _git(snapshot, "rev-parse", "HEAD") != source_sha:
         raise ExecutionSnapshotError("execution snapshot source SHA changed")
@@ -336,7 +339,7 @@ def _validate_frozen_snapshot(snapshot: Path, source_sha: str) -> None:
 
 def execution_snapshot_run(state_dir: Path, run: ReleaseRun) -> ReleaseRun:
     snapshot = state_dir / "snapshots" / run.run_id
-    if not snapshot.exists():
+    if not os.path.lexists(snapshot):
         return run
     if snapshot.is_symlink() or not snapshot.is_dir():
         raise ExecutionSnapshotError("execution snapshot path is unsafe")
@@ -348,6 +351,7 @@ def execution_snapshot_run(state_dir: Path, run: ReleaseRun) -> ReleaseRun:
     metadata = resolved.stat()
     if hasattr(os, "geteuid") and metadata.st_uid != os.geteuid():
         raise ExecutionSnapshotError("execution snapshot has an unexpected owner")
+    _validate_frozen_snapshot(resolved, run.source.sha)
     return replace(run, repo_path=resolved)
 
 
@@ -382,7 +386,7 @@ def freeze_execution_snapshot(snapshot: Path) -> None:
         raise ExecutionSnapshotError("execution snapshot path is unsafe")
     for path in sorted(snapshot.rglob("*"), key=lambda value: len(value.parts), reverse=True):
         if path.is_symlink():
-            continue
+            raise ExecutionSnapshotError("execution snapshot contains a symlink")
         if path.is_file():
             os.chmod(path, 0o400)
         elif path.is_dir():

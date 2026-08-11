@@ -494,11 +494,15 @@ class ReleaseExecutor:
         completed = self.ledger.set_run_status(run_id, "succeeded")
         try:
             cleanup_execution_snapshot(self.ledger.state_dir, run_id)
-        except ExecutionSnapshotError as exc:
+        except (ExecutionSnapshotError, OSError) as exc:
             self.ledger.append_audit_event(
                 run_id,
                 "snapshot.cleanup_failed",
-                {"message": redact(str(exc))},
+                {
+                    "message": redact(str(exc)),
+                    "manual_cleanup_required": True,
+                    "snapshot_run_id": run_id,
+                },
             )
         return completed
 

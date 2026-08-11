@@ -7,6 +7,10 @@ on:
         description: Full 40-character candidate commit SHA
         required: true
         type: string
+      candidate_tag:
+        description: Immutable Shipyard candidate tag bound to candidate_sha
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -19,13 +23,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ inputs.candidate_tag }}
       - name: Verify exact candidate
         env:
           EXPECTED_SHA: ${{ inputs.candidate_sha }}
+          EXPECTED_TAG: ${{ inputs.candidate_tag }}
         run: |
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_TAG" = "shipyard-candidate-$EXPECTED_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git rev-parse "refs/tags/$EXPECTED_TAG^{commit}")" = "$EXPECTED_SHA"
           test -z "$(git status --porcelain --untracked-files=all)"
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:

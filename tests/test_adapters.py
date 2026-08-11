@@ -147,6 +147,8 @@ def test_buzz_git_ref_isolates_helper_chain_and_forwards_only_nostr_auth(
                 "-c",
                 "credential.helper=",
                 "-c",
+                "credential.https://buzz.example.com.helper=",
+                "-c",
                 "credential.https://buzz.example.com.helper=nostr",
                 "-c",
                 "credential.https://buzz.example.com.useHttpPath=true",
@@ -829,6 +831,46 @@ def test_external_adapter_executes_from_approved_immutable_snapshot(git_repo, tm
     assert adapter.config_mode == 0o400
     assert not adapter.execution_repo.exists()
     assert artifact.read_bytes() == b"tampered-after-authorization"
+
+
+def test_successful_run_audits_snapshot_cleanup_oserror(
+    git_repo, tmp_path, monkeypatch
+):
+    artifact = git_repo / "release.bin"
+    artifact.write_bytes(b"approved-artifact")
+    subprocess.run(["git", "add", "release.bin"], cwd=git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add release artifact"], cwd=git_repo, check=True
+    )
+    playbook_path = typed_playbook(tmp_path)
+    playbook_path.write_text(
+        playbook_path.read_text(encoding="utf-8")
+        + '\n[[artifacts]]\npath = "release.bin"\nrequired = true\n',
+        encoding="utf-8",
+    )
+    ledger = Ledger(tmp_path / "state")
+    adapter = SnapshotProbeAdapter(git_repo)
+    executor = ReleaseExecutor(
+        ledger, AdapterRegistry([adapter])  # type: ignore[list-item]
+    )
+    prepared = executor.start(git_repo, load_playbook(playbook_path))
+
+    def fail_cleanup(_state_dir: Path, _run_id: str) -> None:
+        raise OSError("synthetic cleanup failure")
+
+    monkeypatch.setattr("shipyard.executor.cleanup_execution_snapshot", fail_cleanup)
+    completed = executor.resume(
+        prepared.run_id,
+        execute_external=True,
+        confirm_sha=prepared.source_sha,
+        approve_candidate=prepared.candidate_digest,
+        approval_actor="pytest-reviewer",
+        approval_reason="cleanup error regression",
+    )
+
+    assert completed.status == "succeeded"
+    assert ledger.verify_audit_chain(prepared.run_id)
+    assert ledger.list_audit_events(prepared.run_id)[-1]["event_type"] == "snapshot.cleanup_failed"
 
 
 def test_external_adapter_rejects_remote_drift_after_candidate_approval(
