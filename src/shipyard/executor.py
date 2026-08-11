@@ -15,6 +15,12 @@ from typing import Any
 from .adapters.base import AdapterContext, AdapterError, ProviderReadback
 from .adapters.registry import AdapterRegistry
 from .candidate import build_candidate
+from .execution_snapshot import (
+    ExecutionSnapshotError,
+    execution_snapshot_run,
+    freeze_execution_snapshot,
+    prepare_execution_snapshot,
+)
 from .gitops import snapshot_repository
 from .ledger import Ledger, RunBusyError
 from .models import Playbook, ReleaseRun, StepRun, StepStatus
@@ -376,6 +382,7 @@ class ReleaseExecutor:
             if step.status == "succeeded":
                 continue
             self._verify_source(run, step)
+            dispatch_run = run
             if step.effect == "external":
                 if (
                     not step.action
@@ -420,13 +427,28 @@ class ReleaseExecutor:
                     raise ProvenanceDriftError(
                         "release candidate changed immediately before external execution"
                     )
+                if step.action:
+                    try:
+                        dispatch_run = prepare_execution_snapshot(
+                            self.ledger.state_dir, current_run, revalidated
+                        )
+                        snapshot_candidate = build_candidate(dispatch_run)
+                        if snapshot_candidate.digest != current_run.candidate_digest:
+                            raise ProvenanceDriftError(
+                                "immutable execution snapshot does not match the approved candidate"
+                            )
+                        freeze_execution_snapshot(dispatch_run.repo_path)
+                    except ExecutionSnapshotError as exc:
+                        raise ProvenanceDriftError(str(exc)) from exc
             try:
                 if step.action:
                     step_status, exit_code, output_digest, output_preview = (
-                        self._run_adapter_step(run, step)
+                        self._run_adapter_step(dispatch_run, step)
                     )
                 else:
-                    outcome = self._run_step(run_id, run.repo_path, run.source.sha, step)
+                    outcome = self._run_step(
+                        run_id, dispatch_run.repo_path, dispatch_run.source.sha, step
+                    )
                     step_status = (
                         "succeeded"
                         if outcome[0] == 0
@@ -486,6 +508,7 @@ class ReleaseExecutor:
         return exit_code, digest, preview
 
     def _adapter_context(self, run: ReleaseRun, step: StepRun) -> AdapterContext:
+        run = execution_snapshot_run(self.ledger.state_dir, run)
         config = dict(step.config)
         config["repo_path"] = str(run.repo_path)
         return AdapterContext(

@@ -15,6 +15,7 @@ from shipyard.adapters.apple_testflight import (
 from shipyard.adapters.base import (
     AdapterContext,
     AdapterError,
+    ConnectionCheck,
     MutationReceipt,
     ProviderReadback,
 )
@@ -677,6 +678,71 @@ class SequenceAdapter:
             adapter_context.source_sha if status == "succeeded" else None,
             {"provider_status": "live" if status == "succeeded" else "build"},
         )
+
+
+class SnapshotProbeAdapter(SequenceAdapter):
+    def __init__(self, original_repo: Path):
+        super().__init__()
+        self.readbacks = ["succeeded"]
+        self.original_repo = original_repo
+        self.execution_repo: Path | None = None
+        self.observed_artifact: bytes | None = None
+
+    def check(self, adapter_context: AdapterContext) -> ConnectionCheck:
+        return ConnectionCheck(
+            "verified",
+            "render",
+            self.action,
+            "srv-1",
+            {"source": adapter_context.source_sha},
+        )
+
+    def execute(self, adapter_context: AdapterContext) -> MutationReceipt:
+        (self.original_repo / "release.bin").write_bytes(b"tampered-after-authorization")
+        configured = adapter_context.config["repo_path"]
+        assert isinstance(configured, str)
+        self.execution_repo = Path(configured)
+        self.observed_artifact = (self.execution_repo / "release.bin").read_bytes()
+        return super().execute(adapter_context)
+
+
+def test_external_adapter_executes_from_approved_immutable_snapshot(git_repo, tmp_path):
+    artifact = git_repo / "release.bin"
+    artifact.write_bytes(b"approved-artifact")
+    subprocess.run(["git", "add", "release.bin"], cwd=git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add release artifact"], cwd=git_repo, check=True
+    )
+    playbook_path = typed_playbook(tmp_path)
+    playbook_path.write_text(
+        playbook_path.read_text(encoding="utf-8")
+        + '\n[[artifacts]]\npath = "release.bin"\nrequired = true\n',
+        encoding="utf-8",
+    )
+    ledger = Ledger(tmp_path / "state")
+    adapter = SnapshotProbeAdapter(git_repo)
+    executor = ReleaseExecutor(
+        ledger, AdapterRegistry([adapter])  # type: ignore[list-item]
+    )
+    prepared = executor.start(git_repo, load_playbook(playbook_path))
+
+    completed = executor.resume(
+        prepared.run_id,
+        execute_external=True,
+        confirm_sha=prepared.source_sha,
+        approve_candidate=prepared.candidate_digest,
+        approval_actor="pytest-reviewer",
+        approval_reason="snapshot boundary regression",
+    )
+
+    assert completed.status == "succeeded"
+    assert adapter.execution_repo is not None
+    assert adapter.execution_repo != git_repo.resolve()
+    assert adapter.execution_repo.is_relative_to(ledger.state_dir / "snapshots")
+    assert adapter.observed_artifact == b"approved-artifact"
+    assert (adapter.execution_repo / "release.bin").stat().st_mode & 0o777 == 0o400
+    assert (adapter.execution_repo / ".git" / "config").stat().st_mode & 0o777 == 0o400
+    assert artifact.read_bytes() == b"tampered-after-authorization"
 
 
 class ReceiptAuditFailureAdapter(SequenceAdapter):

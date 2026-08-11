@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -53,6 +54,16 @@ def _git(executable: Path, cwd: Path, *args: str) -> str:
 def _remove_created(paths: list[Path]) -> None:
     for path in reversed(paths):
         if path.is_dir() and not path.is_symlink():
+            for root, directories, files in os.walk(path, topdown=False, followlinks=False):
+                for name in files:
+                    candidate = Path(root) / name
+                    if not candidate.is_symlink():
+                        candidate.chmod(0o600)
+                for name in directories:
+                    candidate = Path(root) / name
+                    if not candidate.is_symlink():
+                        candidate.chmod(0o700)
+                Path(root).chmod(0o700)
             shutil.rmtree(path)
         elif path.exists() or path.is_symlink():
             path.unlink()
@@ -157,7 +168,7 @@ repo_path = {json.dumps(str(source))}
         if existed:
             _remove_created(created)
         else:
-            shutil.rmtree(destination, ignore_errors=True)
+            _remove_created([destination])
         if isinstance(exc, QuickstartError):
             raise
         raise QuickstartError(str(exc)) from exc
