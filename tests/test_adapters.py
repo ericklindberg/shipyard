@@ -766,6 +766,8 @@ class SnapshotProbeAdapter(SequenceAdapter):
         self.original_repo = original_repo
         self.execution_repo: Path | None = None
         self.observed_artifact: bytes | None = None
+        self.artifact_mode: int | None = None
+        self.config_mode: int | None = None
 
     def check(self, adapter_context: AdapterContext) -> ConnectionCheck:
         return ConnectionCheck(
@@ -782,6 +784,10 @@ class SnapshotProbeAdapter(SequenceAdapter):
         assert isinstance(configured, str)
         self.execution_repo = Path(configured)
         self.observed_artifact = (self.execution_repo / "release.bin").read_bytes()
+        self.artifact_mode = (self.execution_repo / "release.bin").stat().st_mode & 0o777
+        self.config_mode = (
+            self.execution_repo / ".git" / "config"
+        ).stat().st_mode & 0o777
         return super().execute(adapter_context)
 
 
@@ -819,8 +825,9 @@ def test_external_adapter_executes_from_approved_immutable_snapshot(git_repo, tm
     assert adapter.execution_repo != git_repo.resolve()
     assert adapter.execution_repo.is_relative_to(ledger.state_dir / "snapshots")
     assert adapter.observed_artifact == b"approved-artifact"
-    assert (adapter.execution_repo / "release.bin").stat().st_mode & 0o777 == 0o400
-    assert (adapter.execution_repo / ".git" / "config").stat().st_mode & 0o777 == 0o400
+    assert adapter.artifact_mode == 0o400
+    assert adapter.config_mode == 0o400
+    assert not adapter.execution_repo.exists()
     assert artifact.read_bytes() == b"tampered-after-authorization"
 
 
@@ -928,8 +935,11 @@ def test_receipt_audit_failure_preserves_recoverable_provider_identity(
     uncertain = ledger.get_run(prepared.run_id)
     assert uncertain.status == "uncertain"
     assert uncertain.steps[0].operation_id == "dep-1"
+    snapshot = ledger.state_dir / "snapshots" / prepared.run_id
+    assert snapshot.exists()
     resolved = executor.resolve(prepared.run_id)
     assert resolved.status == "succeeded"
+    assert not snapshot.exists()
     event_types = [
         event["event_type"] for event in ledger.list_audit_events(prepared.run_id)
     ]

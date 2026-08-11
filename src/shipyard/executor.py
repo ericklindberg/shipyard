@@ -18,6 +18,7 @@ from .candidate import build_candidate
 from .connections import inspect_buzz_git_auth
 from .execution_snapshot import (
     ExecutionSnapshotError,
+    cleanup_execution_snapshot,
     execution_snapshot_run,
     freeze_execution_snapshot,
     prepare_execution_snapshot,
@@ -490,7 +491,16 @@ class ReleaseExecutor:
             if step_status != "succeeded":
                 run_status = "uncertain" if step_status == "uncertain" else "failed"
                 return self.ledger.set_run_status(run_id, run_status)
-        return self.ledger.set_run_status(run_id, "succeeded")
+        completed = self.ledger.set_run_status(run_id, "succeeded")
+        try:
+            cleanup_execution_snapshot(self.ledger.state_dir, run_id)
+        except ExecutionSnapshotError as exc:
+            self.ledger.append_audit_event(
+                run_id,
+                "snapshot.cleanup_failed",
+                {"message": redact(str(exc))},
+            )
+        return completed
 
     def _run_step(
         self,

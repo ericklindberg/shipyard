@@ -7,7 +7,8 @@ from shipyard.quickstart import QuickstartError, QuickstartSummary, run_quicksta
 
 
 def test_quickstart_uses_governed_release_and_portable_evidence(tmp_path: Path):
-    summary = run_quickstart(tmp_path / "demo")
+    destination = tmp_path / "demo"
+    summary = run_quickstart(destination)
     report = evidence.verify_evidence_bundle(summary.evidence_path)
 
     assert isinstance(summary, QuickstartSummary)
@@ -21,6 +22,7 @@ def test_quickstart_uses_governed_release_and_portable_evidence(tmp_path: Path):
     assert report["approval_present"] is True
     assert report["receipts_verified"] == 1
     assert summary.evidence_verified is True
+    assert not (destination / "state" / "snapshots" / summary.run_id).exists()
 
 
 def test_quickstart_uses_sanitized_git_environment(tmp_path: Path, monkeypatch):

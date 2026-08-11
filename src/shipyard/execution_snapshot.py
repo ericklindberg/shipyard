@@ -351,6 +351,32 @@ def execution_snapshot_run(state_dir: Path, run: ReleaseRun) -> ReleaseRun:
     return replace(run, repo_path=resolved)
 
 
+def cleanup_execution_snapshot(state_dir: Path, run_id: str) -> None:
+    snapshots = state_dir / "snapshots"
+    snapshot = snapshots / run_id
+    if not os.path.lexists(snapshot):
+        return
+    if snapshot.is_symlink() or not snapshot.is_dir():
+        raise ExecutionSnapshotError("execution snapshot path is unsafe")
+    resolved_snapshots = snapshots.resolve()
+    resolved = snapshot.resolve()
+    try:
+        resolved.relative_to(resolved_snapshots)
+    except ValueError as exc:
+        raise ExecutionSnapshotError("execution snapshot path is unsafe") from exc
+    paths = [resolved, *resolved.rglob("*")]
+    for path in paths:
+        metadata = path.lstat()
+        if hasattr(os, "geteuid") and metadata.st_uid != os.geteuid():
+            raise ExecutionSnapshotError("execution snapshot has an unexpected owner")
+    for path in paths:
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            continue
+        os.chmod(path, 0o700 if stat.S_ISDIR(metadata.st_mode) else 0o600)
+    shutil.rmtree(resolved)
+
+
 def freeze_execution_snapshot(snapshot: Path) -> None:
     if snapshot.is_symlink() or not snapshot.is_dir():
         raise ExecutionSnapshotError("execution snapshot path is unsafe")
