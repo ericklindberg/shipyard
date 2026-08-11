@@ -346,18 +346,19 @@ def test_git_ref_receipts_accept_only_supported_provider_identities(git_repo, tm
         assert verified == 1
         assert errors == []
 
-    invalid_audit = copy.deepcopy(audit)
-    operation_id = next(iter(invalid_audit.receipts))
-    invalid_audit.receipts[operation_id]["provider"] = "render"
-    verified, errors = evidence_module._verify_receipts(
-        status=identity.status,
-        source_sha=identity.source_sha,
-        receipts=invalid_audit.receipts,
-        readbacks=invalid_audit.readbacks,
-        steps_by_operation=steps_by_operation,
-    )
-    assert verified == 0
-    assert errors == [f"adapter receipt provider does not match action: {operation_id}"]
+    for invalid_provider in ("render", [], {}):
+        invalid_audit = copy.deepcopy(audit)
+        operation_id = next(iter(invalid_audit.receipts))
+        invalid_audit.receipts[operation_id]["provider"] = invalid_provider
+        verified, errors = evidence_module._verify_receipts(
+            status=identity.status,
+            source_sha=identity.source_sha,
+            receipts=invalid_audit.receipts,
+            readbacks=invalid_audit.readbacks,
+            steps_by_operation=steps_by_operation,
+        )
+        assert verified == 0
+        assert errors == [f"adapter receipt provider does not match action: {operation_id}"]
 
 
 def test_exported_bundle_is_deterministic_and_verifies_offline(git_repo, tmp_path):

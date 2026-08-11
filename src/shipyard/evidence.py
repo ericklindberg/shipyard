@@ -662,9 +662,13 @@ def _verify_receipts(
             receipt_valid = False
         else:
             expected_providers = _EXPECTED_PROVIDERS.get(str(action))
+            receipt_provider = receipt.get("provider")
             if (
                 expected_providers is not None
-                and receipt.get("provider") not in expected_providers
+                and (
+                    not isinstance(receipt_provider, str)
+                    or receipt_provider not in expected_providers
+                )
             ):
                 errors.append(
                     f"adapter receipt provider does not match action: {operation_id}"
