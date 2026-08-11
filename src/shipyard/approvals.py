@@ -213,17 +213,33 @@ def load_signed_approval(path: str | Path) -> dict[str, Any]:
     return payload
 
 
-def _regular_path(value: str | Path, label: str) -> Path:
-    original = Path(value).expanduser()
-    if original.is_symlink():
-        raise ApprovalPacketError(f"{label} must not be a symlink")
+def _open_regular_descriptor(value: str | Path, label: str) -> int:
+    source = Path(value).expanduser()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        path = original.resolve(strict=True)
+        descriptor = os.open(source, flags)
+        metadata = os.fstat(descriptor)
     except OSError as exc:
-        raise ApprovalPacketError(f"{label} is not readable") from exc
-    if not path.is_file():
+        raise ApprovalPacketError(f"{label} must be a regular file") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(descriptor)
         raise ApprovalPacketError(f"{label} must be a regular file")
-    return path
+    return descriptor
+
+
+def _read_bounded_regular_file(value: str | Path, label: str) -> bytes:
+    descriptor = _open_regular_descriptor(value, label)
+    try:
+        metadata = os.fstat(descriptor)
+        if metadata.st_size > 1024 * 1024:
+            raise ApprovalPacketError(f"{label} must be a bounded regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            encoded = handle.read(1024 * 1024 + 1)
+        if len(encoded) > 1024 * 1024:
+            raise ApprovalPacketError(f"{label} must be a bounded regular file")
+        return encoded
+    finally:
+        os.close(descriptor)
 
 
 def sign_approval_ssh(
@@ -231,36 +247,41 @@ def sign_approval_ssh(
 ) -> dict[str, Any]:
     """Sign canonical approval bytes with an operator-owned OpenSSH key.
 
-    Shipyard passes the key path to ``ssh-keygen`` and never reads or stores key bytes.
+    Shipyard opens the key without following symlinks, passes the inherited descriptor
+    to ``ssh-keygen``, and never reads or stores key bytes.
     """
     encoded = canonical_approval_bytes(statement)
-    key = _regular_path(key_path, "SSH signing key")
+    key_descriptor = _open_regular_descriptor(key_path, "SSH signing key")
     executable = resolve_executable("ssh-keygen", Path.cwd())
-    with tempfile.TemporaryDirectory(prefix="shipyard-approval-sign-") as temporary:
-        statement_path = Path(temporary) / "approval.json"
-        statement_path.write_bytes(encoded)
-        os.chmod(statement_path, 0o600)
-        completed = subprocess.run(  # noqa: S603
-            (
-                str(executable),
-                "-Y",
-                "sign",
-                "-f",
-                str(key),
-                "-n",
-                _SSH_NAMESPACE,
-                str(statement_path),
-            ),
-            env=sanitized_environment(),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
-        signature_path = statement_path.with_suffix(".json.sig")
-        if completed.returncode != 0 or not signature_path.is_file():
-            raise ApprovalPacketError("SSH approval signing failed")
-        signature = base64.b64encode(signature_path.read_bytes()).decode("ascii")
+    try:
+        with tempfile.TemporaryDirectory(prefix="shipyard-approval-sign-") as temporary:
+            statement_path = Path(temporary) / "approval.json"
+            statement_path.write_bytes(encoded)
+            os.chmod(statement_path, 0o600)
+            completed = subprocess.run(  # noqa: S603
+                (
+                    str(executable),
+                    "-Y",
+                    "sign",
+                    "-f",
+                    f"/dev/fd/{key_descriptor}",
+                    "-n",
+                    _SSH_NAMESPACE,
+                    str(statement_path),
+                ),
+                env=sanitized_environment(),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=30,
+                check=False,
+                pass_fds=(key_descriptor,),
+            )
+            signature_path = statement_path.with_suffix(".json.sig")
+            if completed.returncode != 0 or not signature_path.is_file():
+                raise ApprovalPacketError("SSH approval signing failed")
+            signature = base64.b64encode(signature_path.read_bytes()).decode("ascii")
+    finally:
+        os.close(key_descriptor)
     return {
         "api_version": "shipyard.signed-approval/v1",
         "statement": dict(statement),
@@ -307,13 +328,13 @@ def verify_signed_approval_ssh(
         signature_bytes = base64.b64decode(value, validate=True)
     except (ValueError, TypeError) as exc:
         raise ApprovalPacketError("signed approval SSH signature is malformed") from exc
-    signers = _regular_path(allowed_signers, "allowed signers file")
+    signers = _read_bounded_regular_file(allowed_signers, "allowed signers file")
     executable = resolve_executable("ssh-keygen", Path.cwd())
     with tempfile.TemporaryDirectory(prefix="shipyard-approval-verify-") as temporary:
         root = Path(temporary)
         signers_snapshot = root / "allowed-signers"
         signature_path = root / "approval.sig"
-        signers_snapshot.write_bytes(signers.read_bytes())
+        signers_snapshot.write_bytes(signers)
         signature_path.write_bytes(signature_bytes)
         os.chmod(signers_snapshot, 0o600)
         os.chmod(signature_path, 0o600)
