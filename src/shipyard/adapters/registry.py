@@ -4,6 +4,8 @@ from .apple import XcodeCloudBuildAdapter
 from .apple_testflight import TestFlightGroupAdapter
 from .base import AdapterError, DeploymentAdapter
 from .http import UrllibTransport
+from .kubernetes import KubernetesDeploymentAdapter
+from .oci import OciPromotionAdapter
 from .providers import (
     BuzzWorkflowAdapter,
     GitHubWorkflowAdapter,
@@ -25,6 +27,8 @@ class AdapterRegistry:
             VercelAdapter(),
             XcodeCloudBuildAdapter(UrllibTransport()),
             TestFlightGroupAdapter(UrllibTransport()),
+            OciPromotionAdapter(),
+            KubernetesDeploymentAdapter(),
         ]
         self._adapters = {adapter.action: adapter for adapter in configured}
 

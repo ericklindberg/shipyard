@@ -19,6 +19,8 @@ from shipyard.adapters.base import (
     ProviderReadback,
 )
 from shipyard.adapters.http import HttpResponse
+from shipyard.adapters.kubernetes import KubernetesDeploymentAdapter
+from shipyard.adapters.oci import OciPromotionAdapter
 from shipyard.adapters.providers import (
     BuzzWorkflowAdapter,
     GitHubWorkflowAdapter,
@@ -63,6 +65,13 @@ def test_registry_exposes_typed_apple_adapters():
     assert isinstance(
         registry.get("appstoreconnect.testflight"), AppleTestFlightGroupAdapter
     )
+
+
+def test_registry_exposes_digest_native_oci_and_kubernetes_adapters():
+    registry = AdapterRegistry()
+
+    assert isinstance(registry.get("oci.promote"), OciPromotionAdapter)
+    assert isinstance(registry.get("kubernetes.deploy"), KubernetesDeploymentAdapter)
 
 
 def test_git_ref_adapter_connection_check_is_read_only(tmp_path):

@@ -143,6 +143,106 @@ action = "{action}"
     assert load_playbook(path).steps[0].action == action
 
 
+@pytest.mark.parametrize(
+    ("action", "config"),
+    [
+        (
+            "oci.promote",
+            '''registry = "registry.example.com"
+repository = "team/app"
+manifest_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+target_tag = "stable"
+token_env = "OCI_REGISTRY_TOKEN"''',
+        ),
+    ],
+)
+def test_digest_native_actions_are_public_playbook_actions(tmp_path, action, config):
+    path = tmp_path / "shipyard.toml"
+    path.write_text(
+        f'''schema_version = 2
+name = "digest-native-release"
+target = "production"
+provider = "digest-native"
+destination = "provider-destination"
+
+[[steps]]
+id = "adopt"
+name = "Digest adoption"
+effect = "external"
+action = "{action}"
+
+[steps.config]
+{config}
+''',
+        encoding="utf-8",
+    )
+
+    assert load_playbook(path).steps[0].action == action
+
+
+def _write_digest_native_chain(path, *, kubernetes_digest: str) -> None:
+    path.write_text(
+        f'''schema_version = 2
+name = "digest-native-chain"
+target = "production"
+provider = "digest-native"
+destination = "prod-cluster:production:web:web"
+
+[[steps]]
+id = "promote"
+name = "Promote image"
+effect = "external"
+action = "oci.promote"
+
+[steps.config]
+registry = "registry.example.com"
+repository = "team/app"
+manifest_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+target_tag = "stable"
+token_env = "OCI_REGISTRY_TOKEN"
+
+[[steps]]
+id = "deploy"
+name = "Deploy image"
+effect = "external"
+action = "kubernetes.deploy"
+
+[steps.config]
+api_base = "https://kubernetes.example.com"
+cluster_id = "prod-cluster"
+namespace = "production"
+namespace_uid = "namespace-uid"
+deployment = "web"
+deployment_uid = "deployment-uid"
+container = "web"
+image_repository = "registry.example.com/team/app"
+manifest_digest = "{kubernetes_digest}"
+token_env = "KUBERNETES_API_TOKEN"
+''',
+        encoding="utf-8",
+    )
+
+
+def test_kubernetes_action_requires_matching_preceding_oci_promotion(tmp_path):
+    valid = tmp_path / "valid-chain.toml"
+    digest = "sha256:" + "b" * 64
+    _write_digest_native_chain(valid, kubernetes_digest=digest)
+
+    playbook = load_playbook(valid)
+
+    assert [step.action for step in playbook.steps] == [
+        "oci.promote",
+        "kubernetes.deploy",
+    ]
+
+    mismatched = tmp_path / "mismatched-chain.toml"
+    _write_digest_native_chain(
+        mismatched, kubernetes_digest="sha256:" + "c" * 64
+    )
+    with pytest.raises(PlaybookError, match="preceding matching oci.promote"):
+        load_playbook(mismatched)
+
+
 def test_typed_apple_action_rejects_cross_provider_credential_reference(tmp_path):
     path = tmp_path / "shipyard.toml"
     path.write_text(
