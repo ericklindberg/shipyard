@@ -796,18 +796,14 @@ def main(argv: list[str] | None = None) -> int:
             signed_digest = hashlib.sha256(
                 json.dumps(signed, separators=(",", ":"), sort_keys=True).encode("utf-8")
             ).hexdigest()
-            ledger.record_approval(
+            quorum_met = ledger.record_signed_approval(
                 args.run_id,
                 statement["candidate_digest"],
                 actor=statement["actor"],
                 reason=statement["reason"],
                 approved_at=statement["approved_at"],
-                provenance={
-                    "kind": "ssh",
-                    "review_sha256": statement["review_sha256"],
-                    "signed_approval_sha256": signed_digest,
-                    "principal": statement["actor"],
-                },
+                review_sha256=statement["review_sha256"],
+                signed_approval_sha256=signed_digest,
             )
             approval_payload = {
                 "run_id": args.run_id,
@@ -815,6 +811,10 @@ def main(argv: list[str] | None = None) -> int:
                 "actor": statement["actor"],
                 "approved_at": statement["approved_at"],
                 "signature_verified": True,
+                "quorum_met": quorum_met,
+                "signed_approval_count": len(
+                    ledger.list_signed_approvals(args.run_id)
+                ),
             }
             if args.json:
                 _print(approval_payload, as_json=True)

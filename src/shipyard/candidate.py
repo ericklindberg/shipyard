@@ -184,6 +184,7 @@ def build_candidate(run: ReleaseRun) -> ReleaseCandidate:
             "provider": run.provider,
             "identity": run.destination,
         },
+        "approval": {"quorum": run.approval_quorum},
         "artifacts": _artifact_evidence(run),
         "executables": _executable_evidence(run),
         "runtime": {**runtime_identity(), "policy_version": POLICY_VERSION},

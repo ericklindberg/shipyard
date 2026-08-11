@@ -54,6 +54,7 @@ class Playbook:
     destination: str = ""
     artifacts: tuple[ArtifactSpec, ...] = ()
     schema_version: int = 1
+    approval_quorum: int = 1
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,7 @@ class ReleaseRun:
     candidate_payload: dict[str, object] | None = None
     manifest_revision: int = 0
     playbook_schema: int = 1
+    approval_quorum: int = 1
 
     @property
     def source_sha(self) -> str:

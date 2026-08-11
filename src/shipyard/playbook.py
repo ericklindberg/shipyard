@@ -605,6 +605,13 @@ def _parse_artifacts(data: dict[str, Any]) -> tuple[ArtifactSpec, ...]:
     return tuple(artifacts)
 
 
+def _parse_approval_quorum(data: dict[str, Any]) -> int:
+    quorum = data.get("approval_quorum", 1)
+    if not isinstance(quorum, int) or isinstance(quorum, bool) or not 1 <= quorum <= 10:
+        raise PlaybookError("approval_quorum must be an integer between 1 and 10")
+    return quorum
+
+
 def _validate_adapter_config(action: str, config: dict[str, Any], step_id: str) -> None:
     for key, value in config.items():
         lowered = str(key).lower()
@@ -759,6 +766,7 @@ def load_playbook(path: str | Path) -> Playbook:
         _parse_playbook_header(data)
     )
     artifacts = _parse_artifacts(data)
+    approval_quorum = _parse_approval_quorum(data)
     steps = _parse_steps(raw_steps, schema)
     if allow_dirty and any(step.effect == "external" for step in steps):
         raise PlaybookError("external steps require a clean source; allow_dirty must be false")
@@ -773,4 +781,5 @@ def load_playbook(path: str | Path) -> Playbook:
         destination=destination.strip(),
         artifacts=artifacts,
         schema_version=schema,
+        approval_quorum=approval_quorum,
     )

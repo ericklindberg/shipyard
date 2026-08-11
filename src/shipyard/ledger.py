@@ -37,7 +37,7 @@ class RunBusyError(LedgerError):
 
 
 _RUN_ID = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 
 def _now() -> str:
@@ -228,6 +228,16 @@ class Ledger:
                     reason TEXT NOT NULL,
                     approved_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS signed_approvals (
+                    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+                    candidate_digest TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    approved_at TEXT NOT NULL,
+                    review_sha256 TEXT NOT NULL,
+                    signed_approval_sha256 TEXT NOT NULL,
+                    PRIMARY KEY (run_id, actor)
+                );
                 CREATE TABLE IF NOT EXISTS adapter_receipts (
                     run_id TEXT NOT NULL,
                     ordinal INTEGER NOT NULL,
@@ -267,6 +277,7 @@ class Ledger:
                 "candidate_json": "TEXT",
                 "manifest_revision": "INTEGER NOT NULL DEFAULT 0",
                 "playbook_schema": "INTEGER NOT NULL DEFAULT 1",
+                "approval_quorum": "INTEGER NOT NULL DEFAULT 1",
             }
             for column, declaration in migrations.items():
                 if column not in columns:
@@ -311,8 +322,8 @@ class Ledger:
                     run_id, repo_path, playbook_path, playbook_name, playbook_digest,
                     target, allow_dirty, source_json, status, created_at, updated_at,
                     provider, destination, artifacts_json, manifest_revision,
-                    playbook_schema
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, 1, ?)
+                    playbook_schema, approval_quorum
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, 1, ?, ?)
                 """,
                 (
                     run_id,
@@ -335,6 +346,7 @@ class Ledger:
                         sort_keys=True,
                     ),
                     playbook.schema_version,
+                    playbook.approval_quorum,
                 ),
             )
             connection.executemany(
@@ -455,6 +467,7 @@ class Ledger:
             ),
             manifest_revision=row["manifest_revision"],
             playbook_schema=row["playbook_schema"],
+            approval_quorum=row["approval_quorum"],
         )
         self.write_manifest(run)
         return run
@@ -658,12 +671,17 @@ class Ledger:
                 )
         with self._governed_transaction() as connection:
             row = connection.execute(
-                "SELECT candidate_digest FROM runs WHERE run_id = ?", (run_id,)
+                "SELECT candidate_digest, approval_quorum FROM runs WHERE run_id = ?",
+                (run_id,),
             ).fetchone()
             if row is None:
                 raise LedgerError(f"unknown run: {run_id}")
             if row["candidate_digest"] != candidate_digest:
                 raise LedgerError("approval digest does not match the stored candidate")
+            if row["approval_quorum"] > 1:
+                raise LedgerError(
+                    "candidate requires a signed approval quorum; inline approval is disabled"
+                )
             connection.execute(
                 """
                 INSERT INTO approvals (
@@ -708,6 +726,144 @@ class Ledger:
                     "candidate.signed_approval_imported",
                     provenance,
                 )
+
+    def record_signed_approval(
+        self,
+        run_id: str,
+        candidate_digest: str,
+        *,
+        actor: str,
+        reason: str,
+        approved_at: str,
+        review_sha256: str,
+        signed_approval_sha256: str,
+    ) -> bool:
+        actor = actor.strip()
+        reason = reason.strip()
+        if not actor or not reason:
+            raise LedgerError("approval actor and reason are required")
+        try:
+            parsed = datetime.strptime(approved_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=UTC
+            )
+        except ValueError as exc:
+            raise LedgerError("signed approval time must be canonical UTC") from exc
+        if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != approved_at:
+            raise LedgerError("signed approval time must be canonical UTC")
+        for digest in (review_sha256, signed_approval_sha256):
+            if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise LedgerError("signed approval provenance digest is malformed")
+
+        with self._governed_transaction() as connection:
+            row = connection.execute(
+                "SELECT candidate_digest, approval_quorum FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise LedgerError(f"unknown run: {run_id}")
+            if row["candidate_digest"] != candidate_digest:
+                raise LedgerError("approval digest does not match the stored candidate")
+            if connection.execute(
+                "SELECT 1 FROM approvals WHERE run_id = ?", (run_id,)
+            ).fetchone() is not None:
+                raise LedgerError("run already has a recorded approval")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO signed_approvals (
+                        run_id, candidate_digest, actor, reason, approved_at,
+                        review_sha256, signed_approval_sha256
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        candidate_digest,
+                        actor,
+                        reason,
+                        approved_at,
+                        review_sha256,
+                        signed_approval_sha256,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise LedgerError(f"actor {actor} already approved this candidate") from exc
+            self._insert_audit_event(
+                connection,
+                run_id,
+                "candidate.signed_approval_imported",
+                {
+                    "kind": "ssh",
+                    "review_sha256": review_sha256,
+                    "signed_approval_sha256": signed_approval_sha256,
+                    "principal": actor,
+                },
+            )
+            quorum = int(row["approval_quorum"])
+            signed_rows = connection.execute(
+                """
+                SELECT actor, reason, approved_at FROM signed_approvals
+                WHERE run_id = ? AND candidate_digest = ?
+                ORDER BY approved_at, actor
+                """,
+                (run_id, candidate_digest),
+            ).fetchall()
+            quorum_met = len(signed_rows) >= quorum
+            if quorum_met:
+                if quorum == 1:
+                    approval_actor = actor
+                    approval_reason = reason
+                else:
+                    approval_actor = "signed-quorum"
+                    principals = ", ".join(str(item["actor"]) for item in signed_rows)
+                    approval_reason = (
+                        f"{quorum} distinct signed approvals satisfied by: {principals}"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO approvals (
+                        run_id, candidate_digest, actor, reason, approved_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        candidate_digest,
+                        approval_actor,
+                        approval_reason,
+                        approved_at,
+                    ),
+                )
+                self._insert_audit_event(
+                    connection,
+                    run_id,
+                    "candidate.approved",
+                    {
+                        "candidate_digest": candidate_digest,
+                        "actor": approval_actor,
+                        "reason": approval_reason,
+                    },
+                )
+            connection.execute(
+                """
+                UPDATE runs
+                SET manifest_revision = manifest_revision + 1, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (_now(), run_id),
+            )
+        return quorum_met
+
+    def list_signed_approvals(self, run_id: str) -> list[dict[str, str]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT candidate_digest, actor, reason, approved_at,
+                       review_sha256, signed_approval_sha256
+                FROM signed_approvals
+                WHERE run_id = ? ORDER BY approved_at, actor
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_approval(self, run_id: str) -> dict[str, str] | None:
         with self._connect() as connection:

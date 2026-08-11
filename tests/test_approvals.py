@@ -18,21 +18,22 @@ from shipyard.approvals import (
     verify_signed_approval_ssh,
 )
 from shipyard.executor import ReleaseExecutor
-from shipyard.ledger import Ledger
+from shipyard.ledger import Ledger, LedgerError
 from shipyard.playbook import load_playbook
 
 
-def _prepared_run(git_repo: Path, tmp_path: Path):
+def _prepared_run(git_repo: Path, tmp_path: Path, *, approval_quorum: int = 1):
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
     subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=git_repo, check=True)
     playbook = tmp_path / "shipyard.toml"
     playbook.write_text(
-        '''schema_version = 2
+        f'''schema_version = 2
 name = "review-packet"
 target = "sandbox"
 provider = "github"
 destination = "local-sandbox:refs/heads/release"
+approval_quorum = {approval_quorum}
 
 [[steps]]
 id = "publish"
@@ -261,3 +262,59 @@ def test_ledger_records_verified_signed_approval_time_and_provenance_atomically(
     events = ledger.list_audit_events(run.run_id)
     assert events[-1]["event_type"] == "candidate.signed_approval_imported"
     assert events[-1]["payload"] == provenance
+
+
+def test_distinct_signed_principals_are_required_to_satisfy_candidate_quorum(
+    git_repo, tmp_path
+):
+    run = _prepared_run(git_repo, tmp_path, approval_quorum=2)
+    ledger = Ledger(tmp_path / "state")
+
+    with pytest.raises(LedgerError, match="signed approval quorum"):
+        ledger.record_approval(
+            run.run_id,
+            str(run.candidate_digest),
+            actor="inline",
+            reason="must not bypass quorum",
+        )
+
+    first_met = ledger.record_signed_approval(
+        run.run_id,
+        str(run.candidate_digest),
+        actor="alice@example.com",
+        reason="reviewed",
+        approved_at="2026-08-11T00:00:00Z",
+        review_sha256="b" * 64,
+        signed_approval_sha256="c" * 64,
+    )
+    assert first_met is False
+    assert ledger.get_approval(run.run_id) is None
+
+    with pytest.raises(LedgerError, match="already approved"):
+        ledger.record_signed_approval(
+            run.run_id,
+            str(run.candidate_digest),
+            actor="alice@example.com",
+            reason="duplicate",
+            approved_at="2026-08-11T00:01:00Z",
+            review_sha256="b" * 64,
+            signed_approval_sha256="d" * 64,
+        )
+
+    second_met = ledger.record_signed_approval(
+        run.run_id,
+        str(run.candidate_digest),
+        actor="bob@example.com",
+        reason="reviewed",
+        approved_at="2026-08-11T00:02:00Z",
+        review_sha256="b" * 64,
+        signed_approval_sha256="e" * 64,
+    )
+    assert second_met is True
+    approval = ledger.get_approval(run.run_id)
+    assert approval is not None
+    assert approval["actor"] == "signed-quorum"
+    assert [entry["actor"] for entry in ledger.list_signed_approvals(run.run_id)] == [
+        "alice@example.com",
+        "bob@example.com",
+    ]

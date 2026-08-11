@@ -93,7 +93,7 @@ def test_v1_database_is_transactionally_migrated(tmp_path):
         approvals = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='approvals'"
         ).fetchone()
-    assert version == 4
+    assert version == 5
     assert {
         "provider",
         "destination",
@@ -101,6 +101,7 @@ def test_v1_database_is_transactionally_migrated(tmp_path):
         "candidate_digest",
         "candidate_json",
         "manifest_revision",
+        "approval_quorum",
     } <= columns
     assert approvals is not None
     backups = list((state / "backups").glob("shipyard-v1-*.sqlite3"))

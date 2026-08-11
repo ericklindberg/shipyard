@@ -172,6 +172,92 @@ token_env = "GITHUB_TOKEN"
         load_playbook(path)
 
 
+def test_xcode_cloud_action_requires_pre_mutation_source_binding_config(tmp_path):
+    path = tmp_path / "xcode-missing-source.toml"
+    path.write_text(
+        '''schema_version = 2
+name = "xcode-missing-source"
+target = "production"
+provider = "apple"
+destination = "workflow-1:gitref-1"
+
+[[steps]]
+id = "build"
+name = "Build"
+effect = "external"
+action = "xcodecloud.build"
+
+[steps.config]
+workflow_id = "workflow-1"
+git_reference_id = "gitref-1"
+token_env = "APPLE_ASC_TOKEN"
+''',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PlaybookError, match="git_reference_name.*source_remote"):
+        load_playbook(path)
+
+
+def test_playbook_approval_quorum_defaults_to_one_and_accepts_bounded_integer(tmp_path):
+    default_path = tmp_path / "default.toml"
+    write_playbook(
+        default_path,
+        '''[[steps]]
+id = "tests"
+name = "Tests"
+effect = "verify"
+command = ["python3", "--version"]
+''',
+    )
+    quorum_path = tmp_path / "quorum.toml"
+    quorum_path.write_text(
+        '''schema_version = 2
+name = "quorum"
+target = "production"
+provider = "github"
+destination = "repository:refs/heads/main"
+approval_quorum = 2
+
+[[steps]]
+id = "publish"
+name = "Publish"
+effect = "external"
+action = "git.ref"
+
+[steps.config]
+remote = "origin"
+ref = "refs/heads/main"
+''',
+        encoding="utf-8",
+    )
+
+    assert load_playbook(default_path).approval_quorum == 1
+    assert load_playbook(quorum_path).approval_quorum == 2
+
+
+@pytest.mark.parametrize("value", ["true", "0", "11", '"2"'])
+def test_playbook_rejects_invalid_approval_quorum(tmp_path, value):
+    path = tmp_path / "invalid-quorum.toml"
+    path.write_text(
+        f'''schema_version = 1
+name = "invalid-quorum"
+target = "local"
+approval_quorum = {value}
+
+[[steps]]
+id = "tests"
+name = "Tests"
+effect = "verify"
+command = ["python3", "--version"]
+''',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PlaybookError, match="approval_quorum"):
+        load_playbook(path)
+
+
 def test_load_playbook_preserves_argv_without_a_shell(tmp_path):
     path = tmp_path / "shipyard.toml"
     write_playbook(
