@@ -4,6 +4,12 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-11
+
+### Fixed
+
+- Portable evidence verification now accepts the explicitly supported `git.ref` provider identities (`git`, `github`, and `buzz-git`) while continuing to reject action/provider mismatches. This restores export and offline verification for governed Buzz Git runs.
+
 ## [0.5.0] - 2026-08-10
 
 ### Added

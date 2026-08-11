@@ -315,6 +315,51 @@ def test_record_verification_stages_are_behaviorally_isolated(git_repo, tmp_path
     assert all("sentinel" not in errors for errors in error_lists[1:])
 
 
+def test_git_ref_receipts_accept_only_supported_provider_identities(git_repo, tmp_path):
+    ledger, run = _completed_provider_run(git_repo, tmp_path)
+    bundle = export_evidence_bundle(ledger, run.run_id, tmp_path / "providers.tar")
+    with tarfile.open(bundle, "r:") as archive:
+        evidence_file = archive.extractfile("evidence.json")
+        assert evidence_file is not None
+        envelope = json.load(evidence_file)
+
+    record = envelope["run"]
+    identity, identity_errors = evidence_module._verify_record_identity(
+        record, envelope["record_sha256"]
+    )
+    audit, audit_errors = evidence_module._collect_audit_evidence(record, identity)
+    steps_by_operation, step_errors = evidence_module._collect_steps(
+        record, identity.status
+    )
+    assert identity_errors == audit_errors == step_errors == []
+
+    for provider in ("git", "github", "buzz-git"):
+        candidate_audit = copy.deepcopy(audit)
+        next(iter(candidate_audit.receipts.values()))["provider"] = provider
+        verified, errors = evidence_module._verify_receipts(
+            status=identity.status,
+            source_sha=identity.source_sha,
+            receipts=candidate_audit.receipts,
+            readbacks=candidate_audit.readbacks,
+            steps_by_operation=steps_by_operation,
+        )
+        assert verified == 1
+        assert errors == []
+
+    invalid_audit = copy.deepcopy(audit)
+    operation_id = next(iter(invalid_audit.receipts))
+    invalid_audit.receipts[operation_id]["provider"] = "render"
+    verified, errors = evidence_module._verify_receipts(
+        status=identity.status,
+        source_sha=identity.source_sha,
+        receipts=invalid_audit.receipts,
+        readbacks=invalid_audit.readbacks,
+        steps_by_operation=steps_by_operation,
+    )
+    assert verified == 0
+    assert errors == [f"adapter receipt provider does not match action: {operation_id}"]
+
+
 def test_exported_bundle_is_deterministic_and_verifies_offline(git_repo, tmp_path):
     ledger, run = _completed_run(git_repo, tmp_path)
     first = export_evidence_bundle(ledger, run.run_id, tmp_path / "first.tar")

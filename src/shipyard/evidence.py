@@ -31,10 +31,10 @@ _RUN_STATUSES = {
 _STEP_STATUSES = {"pending", "running", "succeeded", "failed", "blocked", "uncertain"}
 _ADAPTER_STATUSES = {"succeeded", "failed", "pending", "unknown"}
 _EXPECTED_PROVIDERS = {
-    "buzz.workflow": "buzz",
-    "github.workflow": "github-actions",
-    "git.ref": "git",
-    "render.deploy": "render",
+    "buzz.workflow": frozenset({"buzz"}),
+    "github.workflow": frozenset({"github-actions"}),
+    "git.ref": frozenset({"git", "github", "buzz-git"}),
+    "render.deploy": frozenset({"render"}),
 }
 
 
@@ -661,8 +661,11 @@ def _verify_receipts(
             errors.append(f"adapter receipt action does not match step: {operation_id}")
             receipt_valid = False
         else:
-            expected_provider = _EXPECTED_PROVIDERS.get(str(action))
-            if expected_provider is not None and receipt.get("provider") != expected_provider:
+            expected_providers = _EXPECTED_PROVIDERS.get(str(action))
+            if (
+                expected_providers is not None
+                and receipt.get("provider") not in expected_providers
+            ):
                 errors.append(
                     f"adapter receipt provider does not match action: {operation_id}"
                 )
