@@ -53,7 +53,7 @@ def plan_github_bootstrap(
     target = f"{owner}/{repo}"
     destination = (
         f"github-actions:{repository_id}:{workflow_id}:"
-        "refs/tags/shipyard-candidate-{source_sha}"
+        f"refs/tags/shipyard-candidate-{source_sha}"
     )
     workflow = f'''name: Shipyard exact-source contract
 
@@ -79,13 +79,11 @@ jobs:
       - name: Verify immutable dispatched source
         env:
           EXPECTED_SHA: ${{{{ inputs.source_sha }}}}
-          DISPATCH_SHA: ${{{{ github.sha }}}}
         run: |
           case "$EXPECTED_SHA" in
             ""|*[!0-9a-f]*) echo "source_sha is not hexadecimal" >&2; exit 1 ;;
           esac
           test "${{#EXPECTED_SHA}}" -eq 40
-          test "$DISPATCH_SHA" = "$EXPECTED_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           echo "Exact source identity verified; this workflow performs no provider mutation."
 '''
@@ -119,7 +117,7 @@ repo = "{repo}"
 repository_id = "{repository_id}"
 workflow_id = "{workflow_id}"
 workflow_file = "{workflow_file}"
-ref = "refs/tags/shipyard-candidate-{{source_sha}}"
+ref = "refs/tags/shipyard-candidate-{source_sha}"
 token_env = "GITHUB_ACTIONS_TOKEN"
 '''
     return BootstrapBundle(

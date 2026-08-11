@@ -29,6 +29,8 @@ def test_bootstrap_plan_is_deterministic_and_safe(tmp_path: Path):
     assert "actions/checkout@v" not in workflow
     assert "persist-credentials: false" in workflow
     assert "inputs.source_sha" in workflow
+    assert "github.sha" not in workflow
+    assert 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in workflow
     assert "performs no provider mutation" in workflow
     assert "secret-token" not in "".join(bundle.files.values())
     assert bundle == _plan()
@@ -37,9 +39,10 @@ def test_bootstrap_plan_is_deterministic_and_safe(tmp_path: Path):
     playbook_path.write_text(bundle.files["shipyard.toml"], encoding="utf-8")
     playbook = load_playbook(playbook_path)
     assert playbook.steps[0].action == "github.workflow"
-    assert playbook.steps[0].config["ref"] == (
-        "refs/tags/shipyard-candidate-{source_sha}"
-    )
+    expected_ref = f"refs/tags/shipyard-candidate-{'a' * 40}"
+    assert playbook.destination.endswith(expected_ref)
+    assert playbook.steps[0].config["ref"] == expected_ref
+    assert "{" not in bundle.files["shipyard.toml"]
 
 
 @pytest.mark.parametrize(
