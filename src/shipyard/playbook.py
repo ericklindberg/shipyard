@@ -97,18 +97,22 @@ _LOCAL_EXECUTABLES = {
     "ty",
 }
 _ADAPTER_ACTIONS = {
+    "appstoreconnect.testflight",
     "buzz.workflow",
     "git.ref",
     "github.workflow",
     "heroku.build",
     "render.deploy",
     "vercel.deploy",
+    "xcodecloud.build",
 }
 _ACTION_ENV_PREFIX = {
+    "appstoreconnect.testflight": "APPLE_",
     "github.workflow": "GITHUB_",
     "heroku.build": "HEROKU_",
     "render.deploy": "RENDER_",
     "vercel.deploy": "VERCEL_",
+    "xcodecloud.build": "APPLE_",
 }
 
 

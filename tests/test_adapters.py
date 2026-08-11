@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from shipyard.adapters.apple import XcodeCloudBuildAdapter
+from shipyard.adapters.apple_testflight import (
+    TestFlightGroupAdapter as AppleTestFlightGroupAdapter,
+)
 from shipyard.adapters.base import (
     AdapterContext,
     AdapterError,
@@ -50,6 +54,15 @@ def context(provider: str, config: dict[str, object]) -> AdapterContext:
 def test_registry_exposes_github_workflow_adapter():
     adapter = AdapterRegistry().get("github.workflow")
     assert isinstance(adapter, GitHubWorkflowAdapter)
+
+
+def test_registry_exposes_typed_apple_adapters():
+    registry = AdapterRegistry()
+
+    assert isinstance(registry.get("xcodecloud.build"), XcodeCloudBuildAdapter)
+    assert isinstance(
+        registry.get("appstoreconnect.testflight"), AppleTestFlightGroupAdapter
+    )
 
 
 def test_git_ref_adapter_connection_check_is_read_only(tmp_path):

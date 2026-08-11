@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from .apple import XcodeCloudBuildAdapter
+from .apple_testflight import TestFlightGroupAdapter
 from .base import AdapterError, DeploymentAdapter
+from .http import UrllibTransport
 from .providers import (
     BuzzWorkflowAdapter,
     GitHubWorkflowAdapter,
@@ -20,6 +23,8 @@ class AdapterRegistry:
             RenderAdapter(),
             HerokuBuildAdapter(),
             VercelAdapter(),
+            XcodeCloudBuildAdapter(UrllibTransport()),
+            TestFlightGroupAdapter(UrllibTransport()),
         ]
         self._adapters = {adapter.action: adapter for adapter in configured}
 

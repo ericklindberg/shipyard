@@ -93,6 +93,81 @@ token_env = "AWS_SECRET_ACCESS_KEY"
         load_playbook(path)
 
 
+@pytest.mark.parametrize(
+    ("action", "config"),
+    [
+        (
+            "xcodecloud.build",
+            '''workflow_id = "workflow-1"
+git_reference_id = "gitref-1"
+token_env = "APPLE_ASC_TOKEN"
+clean = true''',
+        ),
+        (
+            "appstoreconnect.testflight",
+            '''app_id = "app-1"
+build_id = "build-1"
+beta_group_id = "group-1"
+pre_release_version_id = "version-1"
+xcode_cloud_run_id = "run-1"
+bundle_id = "com.example.app"
+marketing_version = "2.1"
+build_number = "42"
+token_env = "APPLE_ASC_TOKEN"''',
+        ),
+    ],
+)
+def test_typed_apple_actions_are_public_playbook_actions(tmp_path, action, config):
+    path = tmp_path / "shipyard.toml"
+    path.write_text(
+        f'''schema_version = 2
+name = "apple-release"
+target = "testflight"
+provider = "apple"
+destination = "apple-destination"
+
+[[steps]]
+id = "apple"
+name = "Apple adoption"
+effect = "external"
+action = "{action}"
+
+[steps.config]
+{config}
+''',
+        encoding="utf-8",
+    )
+
+    assert load_playbook(path).steps[0].action == action
+
+
+def test_typed_apple_action_rejects_cross_provider_credential_reference(tmp_path):
+    path = tmp_path / "shipyard.toml"
+    path.write_text(
+        '''schema_version = 2
+name = "unsafe-apple"
+target = "testflight"
+provider = "apple"
+destination = "workflow-1:gitref-1"
+
+[[steps]]
+id = "build"
+name = "Build"
+effect = "external"
+action = "xcodecloud.build"
+
+[steps.config]
+workflow_id = "workflow-1"
+git_reference_id = "gitref-1"
+token_env = "GITHUB_TOKEN"
+''',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PlaybookError, match="must use a APPLE_"):
+        load_playbook(path)
+
+
 def test_load_playbook_preserves_argv_without_a_shell(tmp_path):
     path = tmp_path / "shipyard.toml"
     write_playbook(
