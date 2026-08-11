@@ -12,9 +12,9 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ### Fixed
 
-- App Store Connect adapters now resolve omitted inline relationships through canonical Apple related-resource endpoints with strict resource typing and bounded Apple-hosted pagination.
+- TestFlight identity validation now resolves omitted inline relationships through canonical Apple related-resource endpoints with strict resource typing and bounded Apple-hosted pagination.
 - Typed adapter execution now records and validates the read-only `check()` result before crossing `adapter.mutation_started`; preflight identity failures are terminal failures with no mutation receipt instead of false uncertain outcomes.
-- Xcode Cloud readback resolves live `workflow` and `sourceBranchOrTag` relationships when Apple returns relationship links with null inline data.
+- Xcode Cloud readback handles live run resources that omit workflow and source-reference relationships by revalidating the configured workflow and SCM reference, the exact Git source SHA, and membership of the receipt run in that workflow. It does not call Apple relationship endpoints that are forbidden for build runs.
 
 ### Security
 

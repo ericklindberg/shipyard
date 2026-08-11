@@ -156,7 +156,9 @@ def test_xcode_cloud_readback_maps_official_status_and_exact_source(
     assert result.observed_sha == commit_sha
 
 
-def test_xcode_cloud_readback_resolves_live_asc_related_relationships(monkeypatch):
+def test_xcode_cloud_readback_falls_back_to_workflow_membership_for_live_shape(
+    monkeypatch,
+):
     monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
     payload: dict[str, object] = {
         "data": {
@@ -167,36 +169,87 @@ def test_xcode_cloud_readback_resolves_live_asc_related_relationships(monkeypatc
                 "completionStatus": "SUCCEEDED",
                 "sourceCommit": {"commitSha": "a" * 40},
             },
-            "relationships": {
-                "workflow": {
-                    "data": None,
-                    "links": {
-                        "related": "https://api.appstoreconnect.apple.com/v1/ciBuildRuns/build-run-9/workflow"
-                    },
-                },
-                "sourceBranchOrTag": {
-                    "data": None,
-                    "links": {
-                        "related": "https://api.appstoreconnect.apple.com/v1/ciBuildRuns/build-run-9/sourceBranchOrTag"
-                    },
-                },
-            },
+            "relationships": {"builds": {"data": None}},
         }
     }
+    workflow_runs = HttpResponse(
+        200,
+        {"data": [{"type": "ciBuildRuns", "id": "build-run-9"}]},
+    )
     transport = FakeTransport(
         [
             HttpResponse(200, payload),
             _resource("ciWorkflows", "workflow-1"),
-            _resource("scmGitReferences", "gitref-1"),
+            _git_reference(),
+            workflow_runs,
         ]
     )
     receipt = MutationReceipt("apple", "xcodecloud.build", "build-run-9", "a" * 40, {})
 
-    result = XcodeCloudBuildAdapter(transport).readback(_context(), receipt)
+    result = _xcode_adapter(transport).readback(_context(), receipt)
 
     assert result.status == "succeeded"
     assert result.observed_sha == "a" * 40
-    assert [call["method"] for call in transport.calls] == ["GET", "GET", "GET"]
+    assert [call["method"] for call in transport.calls] == ["GET", "GET", "GET", "GET"]
+    urls = [call["url"] for call in transport.calls if isinstance(call["url"], str)]
+    assert urls[-1] == (
+        "https://api.appstoreconnect.apple.com/v1/ciWorkflows/workflow-1/buildRuns"
+    )
+    assert not any(url.endswith("/workflow") for url in urls)
+    assert not any(url.endswith("/sourceBranchOrTag") for url in urls)
+
+
+def _live_xcode_run_without_identity_relationships() -> HttpResponse:
+    return HttpResponse(
+        200,
+        {
+            "data": {
+                "type": "ciBuildRuns",
+                "id": "build-run-9",
+                "attributes": {
+                    "executionProgress": "COMPLETE",
+                    "completionStatus": "SUCCEEDED",
+                    "sourceCommit": {"commitSha": "a" * 40},
+                },
+                "relationships": {"builds": {"data": None}},
+            }
+        },
+    )
+
+
+def test_xcode_cloud_live_shape_fails_when_run_is_absent_from_workflow(monkeypatch):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    transport = FakeTransport(
+        [
+            _live_xcode_run_without_identity_relationships(),
+            _resource("ciWorkflows", "workflow-1"),
+            _git_reference(),
+            HttpResponse(200, {"data": []}),
+        ]
+    )
+    receipt = MutationReceipt("apple", "xcodecloud.build", "build-run-9", "a" * 40, {})
+
+    result = _xcode_adapter(transport).readback(_context(), receipt)
+
+    assert result.status == "failed"
+    assert result.evidence["identity_source"] == "workflow_membership"
+
+
+def test_xcode_cloud_live_shape_fails_closed_on_candidate_ref_drift(monkeypatch):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    transport = FakeTransport(
+        [
+            _live_xcode_run_without_identity_relationships(),
+            _resource("ciWorkflows", "workflow-1"),
+            _git_reference(),
+        ]
+    )
+    receipt = MutationReceipt("apple", "xcodecloud.build", "build-run-9", "a" * 40, {})
+
+    with pytest.raises(AdapterError, match="approved source SHA"):
+        _xcode_adapter(transport, observed_sha="b" * 40).readback(_context(), receipt)
+
+    assert len(transport.calls) == 3
 
 
 def test_xcode_cloud_readback_fails_on_provider_relationship_drift(monkeypatch):

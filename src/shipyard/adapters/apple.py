@@ -80,6 +80,32 @@ def _relationship_id_or_related(
     return identifier
 
 
+def _inline_relationship_id(
+    resource: dict[str, object], relationship: str, expected_type: str
+) -> str | None:
+    relationships = resource.get("relationships")
+    if relationships is None:
+        return None
+    if not isinstance(relationships, dict):
+        raise AdapterError("App Store Connect returned malformed relationships")
+    if relationship not in relationships:
+        return None
+    entry = relationships[relationship]
+    if not isinstance(entry, dict):
+        raise AdapterError("App Store Connect returned malformed relationship data")
+    data = entry.get("data")
+    if data is None:
+        return None
+    if (
+        not isinstance(data, dict)
+        or data.get("type") != expected_type
+        or not isinstance(data.get("id"), str)
+        or _RESOURCE_ID.fullmatch(data["id"]) is None
+    ):
+        raise AdapterError("App Store Connect returned malformed relationship data")
+    return data["id"]
+
+
 def _relationship_ids_or_related(
     transport: HttpTransport,
     headers: dict[str, str],
@@ -298,7 +324,7 @@ class XcodeCloudBuildAdapter:
 
     def _identity(
         self, context: AdapterContext
-    ) -> tuple[_XcodeCoordinates, dict[str, str]]:
+    ) -> tuple[_XcodeCoordinates, dict[str, str], dict[str, object]]:
         coordinates = self._coordinates(context)
         headers = self._headers(coordinates)
         workflow = _resource_data(
@@ -342,10 +368,10 @@ class XcodeCloudBuildAdapter:
             raise AdapterError(
                 "Xcode Cloud candidate tag does not resolve to the approved source SHA"
             )
-        return coordinates, headers
+        return coordinates, headers, workflow
 
     def check(self, context: AdapterContext) -> ConnectionCheck:
-        coordinates, _ = self._identity(context)
+        coordinates, _, _ = self._identity(context)
         return ConnectionCheck(
             "verified",
             context.provider,
@@ -361,7 +387,7 @@ class XcodeCloudBuildAdapter:
         )
 
     def execute(self, context: AdapterContext) -> MutationReceipt:
-        coordinates, headers = self._identity(context)
+        coordinates, headers, _ = self._identity(context)
         created = self.transport.request(
             "POST",
             f"{coordinates.base}/v1/ciBuildRuns",
@@ -440,30 +466,33 @@ class XcodeCloudBuildAdapter:
                 observed_sha if isinstance(observed_sha, str) else None,
                 {"identity_match": False},
             )
-        workflow_id = _relationship_id_or_related(
-            self.transport,
-            headers,
-            resource,
-            parent_type="ciBuildRuns",
-            parent_id=receipt.operation_id,
-            relationship="workflow",
-            expected_type="ciWorkflows",
-            operation="Xcode Cloud workflow relationship readback",
+        workflow_id = _inline_relationship_id(resource, "workflow", "ciWorkflows")
+        git_reference_id = _inline_relationship_id(
+            resource, "sourceBranchOrTag", "scmGitReferences"
         )
-        git_reference_id = _relationship_id_or_related(
-            self.transport,
-            headers,
-            resource,
-            parent_type="ciBuildRuns",
-            parent_id=receipt.operation_id,
-            relationship="sourceBranchOrTag",
-            expected_type="scmGitReferences",
-            operation="Xcode Cloud Git reference relationship readback",
+        inline_drift = (
+            workflow_id not in {None, coordinates.workflow_id}
+            or git_reference_id not in {None, coordinates.git_reference_id}
         )
-        identity_matches = (
-            workflow_id == coordinates.workflow_id
-            and git_reference_id == coordinates.git_reference_id
-        )
+        identity_source = "inline"
+        if inline_drift:
+            identity_matches = False
+        elif workflow_id is not None and git_reference_id is not None:
+            identity_matches = True
+        else:
+            verified_coordinates, fallback_headers, workflow = self._identity(context)
+            linked_runs = _relationship_ids_or_related(
+                self.transport,
+                fallback_headers,
+                workflow,
+                parent_type="ciWorkflows",
+                parent_id=verified_coordinates.workflow_id,
+                relationship="buildRuns",
+                expected_type="ciBuildRuns",
+                operation="Xcode Cloud workflow run membership readback",
+            )
+            identity_matches = receipt.operation_id in linked_runs
+            identity_source = "workflow_membership"
         progress = attributes.get("executionProgress") if isinstance(attributes, dict) else None
         completion = attributes.get("completionStatus") if isinstance(attributes, dict) else None
         if not identity_matches or observed_sha != receipt.submitted_sha:
@@ -483,6 +512,7 @@ class XcodeCloudBuildAdapter:
             {
                 "workflow_id": coordinates.workflow_id,
                 "git_reference_id": coordinates.git_reference_id,
+                "identity_source": identity_source,
                 "execution_progress": progress,
                 "completion_status": completion,
             },

@@ -137,7 +137,7 @@ source_remote = "origin"
 token_env = "APPLE_CONNECT_API_TOKEN"
 ```
 
-The run receipt stores the Apple build-run ID. Readback requires Apple `sourceCommit.commitSha` to equal the approved SHA. A mutable or mismatched reference is rejected before `POST /v1/ciBuildRuns`.
+The run receipt stores the Apple build-run ID. Readback requires Apple `sourceCommit.commitSha` to equal the approved SHA. Live Xcode Cloud run resources can omit workflow and source-reference relationships entirely, and Apple forbids those direct relationship endpoints. When that occurs, Shipyard revalidates the configured workflow and SCM reference, re-resolves the exact Git source SHA, and requires the receipt run to appear in the configured workflow's bounded build-run collection. A mutable or mismatched reference is rejected before `POST /v1/ciBuildRuns`.
 
 ### TestFlight
 
