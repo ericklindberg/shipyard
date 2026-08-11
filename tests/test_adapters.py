@@ -29,6 +29,7 @@ from shipyard.adapters.providers import (
     HerokuBuildAdapter,
     RenderAdapter,
     VercelAdapter,
+    _default_command_runner,
 )
 from shipyard.adapters.registry import AdapterRegistry
 from shipyard.execution_snapshot import ExecutionSnapshotError
@@ -99,21 +100,39 @@ def test_git_ref_adapter_connection_check_is_read_only(tmp_path):
     ]
 
 
-def test_git_ref_adapter_ignores_non_identity_remote_diagnostics(tmp_path):
+def test_default_command_runner_keeps_successful_stderr_out_of_identity_output(
+    tmp_path,
+):
+    executable = tmp_path / "emit-output"
+    executable.write_text(
+        "#!/bin/sh\nprintf 'identity-output\\n'\nprintf 'diagnostic-output\\n' >&2\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+
+    code, output = _default_command_runner((str(executable),), tmp_path)
+
+    assert code == 0
+    assert output == "identity-output\n"
+
+
+def test_git_ref_adapter_rejects_non_identity_remote_stdout(tmp_path):
     def runner(command, cwd, allowed_env):
         if command[1:4] == ("remote", "get-url", "--"):
             return 0, "ssh://git@example.test/repository.git\n"
         return 0, f"Warning: synthetic SSH diagnostic\n{SHA}\trefs/heads/main\n"
 
-    result = GitRefAdapter(runner=runner).check(
-        context(
-            "github",
-            {"remote": "origin", "ref": "refs/heads/main", "repo_path": str(tmp_path)},
+    with pytest.raises(AdapterError, match="malformed identity"):
+        GitRefAdapter(runner=runner).check(
+            context(
+                "github",
+                {
+                    "remote": "origin",
+                    "ref": "refs/heads/main",
+                    "repo_path": str(tmp_path),
+                },
+            )
         )
-    )
-
-    assert result.status == "verified"
-    assert result.identity == SHA
 
 
 def test_git_ref_adapter_rejects_credential_bearing_https_remote_before_network(

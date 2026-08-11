@@ -51,7 +51,11 @@ def _default_command_runner(
         timeout=60,
         check=False,
     )
-    output = (completed.stdout + completed.stderr)[-64_000:]
+    output = (
+        completed.stdout
+        if completed.returncode == 0
+        else completed.stdout + completed.stderr
+    )[-64_000:]
     return completed.returncode, output
 
 
@@ -118,8 +122,10 @@ class GitRefAdapter:
     def _remote_refs(output: str) -> dict[str, str]:
         result: dict[str, str] = {}
         for line in output.splitlines():
-            if "\t" not in line:
+            if not line:
                 continue
+            if "\t" not in line:
+                raise AdapterError("Git remote verification returned malformed identity")
             fields = line.split("\t")
             if (
                 len(fields) != 2

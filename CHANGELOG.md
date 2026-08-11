@@ -19,6 +19,7 @@ All notable changes to Shipyard will be documented in this file. The format foll
 ### Security
 
 - Annotated candidate-tag mode is restricted to `refs/tags/shipyard-candidate-<exact-source-sha>` on the GitHub provider, rejects credential-bearing HTTP(S) remotes before network access, never force-pushes, leaves the governed checkout untouched, and requires readback of both the original tag object and peeled approved commit.
+- Successful Git identity commands parse stdout only; non-empty malformed identity lines fail closed while stderr remains bounded diagnostic output for failed commands.
 - Unexpected or malformed adapter preflight failures terminate before the mutation boundary without persisting untrusted exception contents.
 - Malformed non-null Apple relationship data fails closed instead of falling back to another provider representation.
 
