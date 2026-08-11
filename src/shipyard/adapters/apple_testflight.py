@@ -225,8 +225,14 @@ class TestFlightGroupAdapter:
             coordinates.beta_group_id,
             "TestFlight beta group verification",
         )
-        if group.get("type") != "betaGroups":
-            raise AdapterError("TestFlight beta group verification returned a different type")
+        group_app_id = _relationship_id(group, "app", "apps")
+        if (
+            group.get("type") != "betaGroups"
+            or group_app_id != coordinates.app_id
+        ):
+            raise AdapterError(
+                "TestFlight beta group does not belong to the configured app"
+            )
         return coordinates, headers
 
     def check(self, context: AdapterContext) -> ConnectionCheck:

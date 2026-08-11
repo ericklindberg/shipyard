@@ -90,6 +90,21 @@ class XcodeCloudBuildAdapter:
     def _resolve_remote_source(repo_path: Path, remote: str, reference: str) -> str:
         git = resolve_executable("git", repo_path)
         try:
+            configured = subprocess.run(  # noqa: S603
+                (str(git), "remote", "get-url", "--all", remote),
+                cwd=repo_path,
+                env=sanitized_environment(),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            configured_urls = [line for line in configured.stdout.splitlines() if line]
+            if configured.returncode != 0 or len(configured_urls) != 1:
+                raise AdapterError(
+                    "Xcode Cloud source remote must name exactly one configured Git remote"
+                )
             completed = subprocess.run(  # noqa: S603
                 (str(git), "ls-remote", "--exit-code", remote, reference, f"{reference}^{{}}"),
                 cwd=repo_path,

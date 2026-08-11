@@ -227,6 +227,13 @@ def test_xcode_cloud_source_resolver_reads_lightweight_and_annotated_candidate_t
     assert observed == source_sha
 
 
+def test_xcode_cloud_source_resolver_rejects_unconfigured_remote(git_repo):
+    reference = f"refs/tags/shipyard-candidate-{'a' * 40}"
+
+    with pytest.raises(AdapterError, match="exactly one configured Git remote"):
+        XcodeCloudBuildAdapter._resolve_remote_source(git_repo, "origin", reference)
+
+
 @pytest.mark.parametrize(
     ("config_update", "message"),
     [
@@ -315,7 +322,18 @@ def _testflight_identity_responses():
                 }
             },
         ),
-        _resource("betaGroups", "group-1"),
+        HttpResponse(
+            200,
+            {
+                "data": {
+                    "type": "betaGroups",
+                    "id": "group-1",
+                    "relationships": {
+                        "app": {"data": {"type": "apps", "id": "app-1"}}
+                    },
+                }
+            },
+        ),
     ]
 
 
@@ -349,6 +367,22 @@ def test_testflight_execute_revalidates_then_adds_exact_build_relationship(monke
         },
         "body": {"data": [{"type": "builds", "id": "build-1"}]},
     }
+
+
+def test_testflight_refuses_beta_group_from_different_app_before_post(monkeypatch):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    responses = _testflight_identity_responses()
+    group = responses[-1].payload["data"]
+    assert isinstance(group, dict)
+    group["relationships"] = {
+        "app": {"data": {"type": "apps", "id": "different-app"}}
+    }
+    transport = FakeTransport(responses)
+
+    with pytest.raises(AdapterError, match="beta group does not belong"):
+        AppleTestFlightGroupAdapter(transport).execute(_testflight_context())
+
+    assert all(call["method"] != "POST" for call in transport.calls)
 
 
 def test_testflight_readback_drains_relationship_pages_and_finds_build(monkeypatch):

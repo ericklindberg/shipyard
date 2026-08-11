@@ -125,17 +125,21 @@ def _executable_evidence(run: ReleaseRun) -> list[dict[str, object]]:
 def _action_evidence(
     run: ReleaseRun, action: str | None, config: dict[str, object]
 ) -> dict[str, object]:
-    if action != "git.ref":
+    remote_key = {
+        "git.ref": "remote",
+        "xcodecloud.build": "source_remote",
+    }.get(action or "")
+    if remote_key is None:
         return {}
-    remote = config.get("remote", "origin")
+    remote = config.get(remote_key, "origin")
     if not isinstance(remote, str):
-        raise CandidateError("git.ref remote must be a string")
+        raise CandidateError(f"{action} remote must be a string")
     if (
         not _NAMED_GIT_REMOTE.fullmatch(remote)
         or ".." in remote
         or remote.endswith("/")
     ):
-        raise CandidateError("git.ref must use a named Git remote")
+        raise CandidateError(f"{action} must use a named Git remote")
     try:
         git = resolve_executable("git", run.repo_path)
         completed = subprocess.run(  # noqa: S603
