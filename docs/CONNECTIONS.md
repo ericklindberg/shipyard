@@ -139,7 +139,7 @@ git config --local credential.https://relay.example.com.useHttpPath true
 install -d -m 700 ~/.config/nostr
 your-secret-manager read buzz-nostr-key > ~/.config/nostr/buzz.key
 chmod 600 ~/.config/nostr/buzz.key
-git config --local nostr.keyfile ~/.config/nostr/buzz.key
+git config --local nostr.keyfile "$HOME/.config/nostr/buzz.key"
 
 shipyard connection add buzz-git-production \
   --provider buzz-git \
@@ -153,7 +153,9 @@ shipyard connection check buzz-git-production --repo . --json
 shipyard connection check buzz-git-production --repo . --allow-network --json
 ```
 
-The offline result includes `buzz_git_auth` with the Git version, remote host, host-scoped-helper state, `useHttpPath`, key-source kind, and allowlisted issues. It never includes the remote's full path, key-file path, private key, authorization event, or signed header. Each smart-HTTP request receives a fresh method/URL-bound NIP-98 proof from Git's credential protocol.
+The offline result includes `buzz_git_auth` with the Git version, canonical HTTPS authority (including a configured nondefault port), host-scoped-helper state, `useHttpPath`, key-source kind, and allowlisted issues. It never includes the remote's full path, key-file path, private key, authorization event, or signed header.
+
+Before each Buzz smart-HTTP operation, Shipyard resets the inherited Git credential-helper chain and enables exactly one `nostr` helper for the approved authority. A configured key file is opened without following any path-component symlink, copied by file descriptor into a private per-operation file, and removed afterward. Execution snapshots keep their own private copy under `.git`; they never retain the mutable source pathname. Each smart-HTTP request receives a fresh method/URL-bound NIP-98 proof from Git's credential protocol.
 
 For managed automation, launch Shipyard through your secret manager so `BUZZ_AUTH_TAG` exists only in the process environment. Shipyard forwards only `NOSTR_PRIVATE_KEY` and `BUZZ_AUTH_TAG` to `git` for `buzz-git`; other Git providers receive neither variable.
 

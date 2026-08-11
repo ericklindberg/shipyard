@@ -575,6 +575,93 @@ def test_buzz_git_readiness_is_host_scoped_and_never_exposes_key_material(
     assert "nsec-secret" not in json.dumps(result)
 
 
+def test_buzz_git_readiness_scopes_helper_to_nondefault_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    remote_url = "https://buzz.example.com:8443/git/owner/repository.git"
+    monkeypatch.setenv("NOSTR_PRIVATE_KEY", "synthetic-private-key")
+    monkeypatch.setattr(
+        connections,
+        "_resolve_buzz_git_executable",
+        lambda name, _repo: Path(f"/usr/local/bin/{name}"),
+    )
+
+    def command(argv: tuple[str, ...], _repo: Path) -> tuple[int, str]:
+        responses = {
+            ("--version",): (0, "git version 2.46.3\n"),
+            ("remote", "get-url", "--all", "buzz"): (0, f"{remote_url}\n"),
+            (
+                "config",
+                "--get-all",
+                "credential.https://buzz.example.com:8443.helper",
+            ): (0, "nostr\n"),
+            (
+                "config",
+                "--get-urlmatch",
+                "credential.useHttpPath",
+                remote_url,
+            ): (0, "true\n"),
+        }
+        return responses.get(argv[1:], (1, ""))
+
+    monkeypatch.setattr(connections, "_run_buzz_git_command", command)
+
+    result = inspect_buzz_git_auth(repo, "buzz")
+
+    assert result["ready"] is True
+    assert result["remote_host"] == "buzz.example.com:8443"
+
+
+def test_buzz_git_readiness_rejects_keyfile_beneath_symlinked_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    actual_parent = tmp_path / "actual"
+    actual_parent.mkdir()
+    key = actual_parent / "nostr.key"
+    key.write_text("synthetic-private-key", encoding="utf-8")
+    key.chmod(0o600)
+    linked_parent = tmp_path / "linked"
+    linked_parent.symlink_to(actual_parent, target_is_directory=True)
+    configured = linked_parent / "nostr.key"
+    remote_url = "https://buzz.example.com/git/owner/repository.git"
+    monkeypatch.delenv("NOSTR_PRIVATE_KEY", raising=False)
+    monkeypatch.setattr(
+        connections,
+        "_resolve_buzz_git_executable",
+        lambda name, _repo: Path(f"/usr/local/bin/{name}"),
+    )
+
+    def command(argv: tuple[str, ...], _repo: Path) -> tuple[int, str]:
+        responses = {
+            ("--version",): (0, "git version 2.46.3\n"),
+            ("remote", "get-url", "--all", "buzz"): (0, f"{remote_url}\n"),
+            (
+                "config",
+                "--get-all",
+                "credential.https://buzz.example.com.helper",
+            ): (0, "nostr\n"),
+            (
+                "config",
+                "--get-urlmatch",
+                "credential.useHttpPath",
+                remote_url,
+            ): (0, "true\n"),
+            ("config", "--get", "nostr.keyfile"): (0, f"{configured}\n"),
+        }
+        return responses.get(argv[1:], (1, ""))
+
+    monkeypatch.setattr(connections, "_run_buzz_git_command", command)
+
+    result = inspect_buzz_git_auth(repo, "buzz")
+
+    assert result["ready"] is False
+    assert result["key_ready"] is False
+
+
 @pytest.mark.parametrize(
     ("version", "helper", "key_mode", "expected_issue"),
     [

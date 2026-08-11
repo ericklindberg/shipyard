@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import os
 import subprocess
 from pathlib import Path
 
@@ -7,6 +9,7 @@ import pytest
 
 from shipyard.execution_snapshot import (
     ExecutionSnapshotError,
+    _copy_approved_artifact,
     _copy_buzz_auth_config,
 )
 
@@ -46,7 +49,13 @@ def test_buzz_snapshot_copies_only_safe_credential_references(
         _git(snapshot, "config", "--get", f"credential.https://{host}.useHttpPath")
         == "true"
     )
-    assert _git(snapshot, "config", "--get", "nostr.keyfile") == str(keyfile.resolve())
+    private_copy = snapshot / ".git" / "shipyard-credentials" / "nostr.key"
+    assert _git(snapshot, "config", "--get", "nostr.keyfile") == str(private_copy)
+    assert private_copy.read_text(encoding="utf-8") == "nsec-secret-must-not-be-copied"
+    assert private_copy.stat().st_mode & 0o777 == 0o400
+    keyfile.write_text("replaced-after-copy", encoding="utf-8")
+    assert private_copy.read_text(encoding="utf-8") == "nsec-secret-must-not-be-copied"
+    assert _git(snapshot, "config", "--local", "--get-all", "credential.helper") == ""
     assert "nsec-secret" not in (snapshot / ".git" / "config").read_text(encoding="utf-8")
 
 
@@ -66,3 +75,41 @@ def test_buzz_snapshot_rejects_arbitrary_credential_helper_command(
             snapshot,
             f"https://{host}/git/owner/repository.git",
         )
+
+
+def test_artifact_copy_is_anchored_when_parent_path_is_swapped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "source"
+    parent = source / "safe"
+    parent.mkdir(parents=True)
+    approved = b"approved-artifact"
+    (parent / "release.bin").write_bytes(approved)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "release.bin").write_bytes(b"tampered-external-artifact")
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    original_open = os.open
+    swapped = False
+
+    def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and str(path).endswith("release.bin"):
+            swapped = True
+            parent.rename(source / "approved-parent")
+            parent.symlink_to(outside, target_is_directory=True)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+    _copy_approved_artifact(
+        source,
+        snapshot,
+        {
+            "path": "safe/release.bin",
+            "size": len(approved),
+            "sha256": hashlib.sha256(approved).hexdigest(),
+        },
+    )
+
+    assert (snapshot / "safe" / "release.bin").read_bytes() == approved

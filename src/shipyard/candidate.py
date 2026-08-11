@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .identity import runtime_identity
 from .models import ReleaseRun
 from .runtime import RuntimeIdentityError, resolve_executable, sanitized_environment
+from .safe_files import SafeFileError, open_relative_regular, relative_parts
 
 POLICY_VERSION = "shipyard-safety-v1"
 _NAMED_GIT_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
@@ -34,7 +37,14 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _canonical_remote(value: str | None) -> str | None:
+def _hash_descriptor(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    while chunk := os.read(descriptor, 1024 * 1024):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_remote(value: str | None) -> str | None:
     if not value:
         return None
     scp = re.fullmatch(r"(?:[^@]+@)?([^:]+):(.+)", value)
@@ -56,35 +66,40 @@ def _artifact_evidence(run: ReleaseRun) -> list[dict[str, object]]:
     root = run.repo_path.resolve()
     evidence: list[dict[str, object]] = []
     for specification in run.artifacts:
-        candidate = root / specification.path
-        lexical = candidate.resolve(strict=False)
         try:
-            lexical.relative_to(root)
-        except ValueError as exc:
-            raise CandidateError(f"artifact escapes repository: {specification.path}") from exc
-        try:
-            path = candidate.resolve(strict=True)
-        except FileNotFoundError as exc:
-            if specification.required:
-                raise CandidateError(
-                    f"required artifact is missing: {specification.path}"
-                ) from exc
-            continue
-        try:
-            path.relative_to(root)
-        except ValueError as exc:
-            raise CandidateError(f"artifact escapes repository: {specification.path}") from exc
-        if candidate.is_symlink() or not path.is_file():
+            relative_parts(specification.path)
+        except SafeFileError as exc:
             raise CandidateError(
-                f"artifact must be a regular non-symlink file: {specification.path}"
+                f"artifact escapes repository: {specification.path}"
+            ) from exc
+        try:
+            descriptor = open_relative_regular(root, specification.path)
+        except SafeFileError as exc:
+            candidate_path = root / specification.path
+            if not os.path.lexists(candidate_path):
+                if specification.required:
+                    raise CandidateError(
+                        f"required artifact is missing: {specification.path}"
+                    ) from exc
+                continue
+            raise CandidateError(
+                f"artifact is missing or unsafe: {specification.path}"
+            ) from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise CandidateError(
+                    f"artifact must be a regular non-symlink file: {specification.path}"
+                )
+            evidence.append(
+                {
+                    "path": specification.path,
+                    "size": metadata.st_size,
+                    "sha256": _hash_descriptor(descriptor),
+                }
             )
-        evidence.append(
-            {
-                "path": specification.path,
-                "size": path.stat().st_size,
-                "sha256": _hash_file(path),
-            }
-        )
+        finally:
+            os.close(descriptor)
     return evidence
 
 
@@ -153,7 +168,7 @@ def _action_evidence(
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise CandidateError(f"cannot resolve git remote {remote!r}") from exc
-    return {"remote_url": _canonical_remote(completed.stdout.strip())}
+    return {"remote_url": canonical_remote(completed.stdout.strip())}
 
 
 def build_candidate(run: ReleaseRun) -> ReleaseCandidate:
@@ -163,7 +178,7 @@ def build_candidate(run: ReleaseRun) -> ReleaseCandidate:
         "policy_version": POLICY_VERSION,
         "source": {
             "sha": run.source.sha,
-            "repository": _canonical_remote(run.source.remote_url),
+            "repository": canonical_remote(run.source.remote_url),
             "dirty": run.source.dirty,
             "worktree_sha256": run.source.worktree_digest,
         },

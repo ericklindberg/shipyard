@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 
 import pytest
 
-from shipyard.adapters.base import AdapterContext, AdapterError
+from shipyard.adapters.base import AdapterContext, AdapterError, MutationReceipt
 from shipyard.adapters.kubernetes import KubernetesDeploymentAdapter
 from shipyard.adapters.oci import OciPromotionAdapter
 from shipyard.adapters.raw_http import RawHttpResponse, UrllibRawTransport
@@ -153,6 +153,66 @@ def test_oci_promotion_hashes_exact_manifest_puts_once_and_reads_back(monkeypatc
     assert receipt.submitted_sha == SHA
     assert readback.status == "succeeded"
     assert readback.observed_sha == SHA
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        MutationReceipt("other", "oci.promote", "op", SHA, {}),
+        MutationReceipt("oci", "other", "op", SHA, {}),
+        MutationReceipt("oci", "oci.promote", "op", "b" * 40, {}),
+        MutationReceipt(
+            "oci",
+            "oci.promote",
+            "op",
+            SHA,
+            {
+                "destination": "registry.example.com/team/app:other",
+                "manifest_digest": SOURCE_DIGEST,
+                "target_tag": "other",
+            },
+        ),
+    ],
+)
+def test_oci_readback_rejects_receipt_identity_drift_before_network(
+    monkeypatch, receipt
+):
+    monkeypatch.setenv("OCI_REGISTRY_TOKEN", "synthetic-token")
+    transport = FakeRawTransport([])
+
+    with pytest.raises(AdapterError, match="receipt"):
+        OciPromotionAdapter(transport).readback(_oci_context(SOURCE_DIGEST), receipt)
+
+    assert transport.requests == []
+
+
+def test_oci_readback_rejects_context_drift_from_receipt_before_network(monkeypatch):
+    monkeypatch.setenv("OCI_REGISTRY_TOKEN", "synthetic-token")
+    context = _oci_context(SOURCE_DIGEST)
+    receipt = MutationReceipt(
+        "oci",
+        "oci.promote",
+        "oci-operation",
+        SHA,
+        {
+            "destination": context.destination,
+            "manifest_digest": SOURCE_DIGEST,
+            "target_tag": "stable",
+        },
+    )
+    drifted = AdapterContext(
+        run_id=context.run_id,
+        source_sha=context.source_sha,
+        provider=context.provider,
+        destination="registry.example.com/team/app:other",
+        config={**context.config, "target_tag": "other"},
+    )
+    transport = FakeRawTransport([])
+
+    with pytest.raises(AdapterError, match="receipt"):
+        OciPromotionAdapter(transport).readback(drifted, receipt)
+
+    assert transport.requests == []
 
 
 def test_oci_promotion_refuses_image_not_bound_to_approved_source_before_put(monkeypatch):

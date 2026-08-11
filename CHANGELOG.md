@@ -29,6 +29,9 @@ All notable changes to Shipyard will be documented in this file. The format foll
 - Apple mutation preflight now proves configured Git remote, exact candidate tag/SHA, Apple canonical reference, build/app identity, and beta-group/app ownership before POST.
 - OCI and Kubernetes mutations use bounded HTTPS transports with ambient proxies and redirects disabled, exact provider identity checks, no automatic retries, and fail-closed source/digest drift handling.
 - Buzz Git authentication requires Git 2.46+, a host-scoped request-aware `git-credential-nostr` helper, and a secure environment or `0600` key source; static authorization headers and credential-bearing remotes remain forbidden.
+- Buzz Git operations reset ambient credential-helper chains, bind the exact HTTPS authority including nondefault ports, and use descriptor-snapshotted private key files.
+- Candidate and execution-snapshot artifact reads now traverse every repository-relative path component without following symlinks; reconstructed remotes and reusable frozen snapshots are revalidated against approved evidence.
+- OCI reconciliation validates provider, action, source SHA, operation ID, destination, tag, and manifest digest against the durable mutation receipt before readback.
 
 ## [0.4.0] - 2026-08-10
 

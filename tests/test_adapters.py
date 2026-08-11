@@ -116,11 +116,16 @@ def test_git_ref_adapter_check_rejects_missing_named_remote(tmp_path):
     assert commands == [("git", "remote", "get-url", "--", "origin")]
 
 
-def test_buzz_git_ref_forwards_only_nostr_private_key_reference(tmp_path):
+def test_buzz_git_ref_isolates_helper_chain_and_forwards_only_nostr_auth(
+    tmp_path, monkeypatch
+):
     calls = []
+    monkeypatch.setenv("NOSTR_PRIVATE_KEY", "synthetic-private-key")
 
     def runner(command, cwd, allowed_env):
         calls.append((command, allowed_env))
+        if command == ("git", "remote", "get-url", "--all", "buzz"):
+            return 0, "https://buzz.example.com/git/owner/repository.git\n"
         return 0, f"{SHA}\trefs/heads/main\n"
 
     result = GitRefAdapter(runner=runner).check(
@@ -133,14 +138,61 @@ def test_buzz_git_ref_forwards_only_nostr_private_key_reference(tmp_path):
     assert result.status == "verified"
     assert calls == [
         (
-            ("git", "remote", "get-url", "--", "buzz"),
-            ("NOSTR_PRIVATE_KEY", "BUZZ_AUTH_TAG"),
+            ("git", "remote", "get-url", "--all", "buzz"),
+            (),
         ),
         (
-            ("git", "ls-remote", "buzz", "refs/heads/main"),
+            (
+                "git",
+                "-c",
+                "credential.helper=",
+                "-c",
+                "credential.https://buzz.example.com.helper=nostr",
+                "-c",
+                "credential.https://buzz.example.com.useHttpPath=true",
+                "ls-remote",
+                "buzz",
+                "refs/heads/main",
+            ),
             ("NOSTR_PRIVATE_KEY", "BUZZ_AUTH_TAG"),
         ),
     ]
+
+
+def test_buzz_git_ref_snapshots_keyfile_for_each_operation(tmp_path, monkeypatch):
+    monkeypatch.delenv("NOSTR_PRIVATE_KEY", raising=False)
+    keyfile = tmp_path / "nostr.key"
+    keyfile.write_text("synthetic-private-key", encoding="utf-8")
+    keyfile.chmod(0o600)
+    observed_copy: Path | None = None
+
+    def runner(command, cwd, allowed_env):
+        nonlocal observed_copy
+        if command == ("git", "remote", "get-url", "--all", "buzz"):
+            return 0, "https://buzz.example.com/git/owner/repository.git\n"
+        if command == ("git", "config", "--get", "nostr.keyfile"):
+            return 0, f"{keyfile}\n"
+        configured = next(
+            value.removeprefix("nostr.keyfile=")
+            for value in command
+            if value.startswith("nostr.keyfile=")
+        )
+        observed_copy = Path(configured)
+        assert observed_copy != keyfile
+        assert observed_copy.read_text(encoding="utf-8") == "synthetic-private-key"
+        assert observed_copy.stat().st_mode & 0o777 == 0o400
+        return 0, f"{SHA}\trefs/heads/main\n"
+
+    result = GitRefAdapter(runner=runner).check(
+        context(
+            "buzz-git",
+            {"remote": "buzz", "ref": "refs/heads/main", "repo_path": str(tmp_path)},
+        )
+    )
+
+    assert result.status == "verified"
+    assert observed_copy is not None
+    assert not observed_copy.exists()
 
 
 def test_github_workflow_connection_check_verifies_canonical_repository_and_workflow(
@@ -770,6 +822,62 @@ def test_external_adapter_executes_from_approved_immutable_snapshot(git_repo, tm
     assert (adapter.execution_repo / "release.bin").stat().st_mode & 0o777 == 0o400
     assert (adapter.execution_repo / ".git" / "config").stat().st_mode & 0o777 == 0o400
     assert artifact.read_bytes() == b"tampered-after-authorization"
+
+
+def test_external_adapter_rejects_remote_drift_after_candidate_approval(
+    git_repo, tmp_path
+):
+    original = tmp_path / "original.git"
+    subprocess.run(["git", "init", "--bare", str(original)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(original)],
+        cwd=git_repo,
+        check=True,
+    )
+    ledger = Ledger(tmp_path / "state")
+    executor = ReleaseExecutor(
+        ledger,
+        AdapterRegistry([SnapshotProbeAdapter(git_repo)]),  # type: ignore[list-item]
+    )
+    prepared = executor.start(git_repo, load_playbook(typed_playbook(tmp_path)))
+    replacement = tmp_path / "replacement.git"
+    subprocess.run(["git", "init", "--bare", str(replacement)], check=True)
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", str(replacement)],
+        cwd=git_repo,
+        check=True,
+    )
+
+    with pytest.raises(ProvenanceDriftError, match="remote changed"):
+        executor.resume(
+            prepared.run_id,
+            execute_external=True,
+            confirm_sha=prepared.source_sha,
+            approve_candidate=prepared.candidate_digest,
+            approval_actor="pytest-reviewer",
+            approval_reason="remote drift regression",
+        )
+
+
+def test_external_adapter_rejects_preexisting_unmanifested_snapshot(git_repo, tmp_path):
+    ledger = Ledger(tmp_path / "state")
+    executor = ReleaseExecutor(
+        ledger,
+        AdapterRegistry([SnapshotProbeAdapter(git_repo)]),  # type: ignore[list-item]
+    )
+    prepared = executor.start(git_repo, load_playbook(typed_playbook(tmp_path)))
+    leftover = ledger.state_dir / "snapshots" / prepared.run_id
+    leftover.mkdir(parents=True, mode=0o700)
+
+    with pytest.raises(ProvenanceDriftError, match="not frozen"):
+        executor.resume(
+            prepared.run_id,
+            execute_external=True,
+            confirm_sha=prepared.source_sha,
+            approve_candidate=prepared.candidate_digest,
+            approval_actor="pytest-reviewer",
+            approval_reason="leftover snapshot regression",
+        )
 
 
 class ReceiptAuditFailureAdapter(SequenceAdapter):

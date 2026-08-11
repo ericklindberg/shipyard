@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from .adapters.base import DeploymentAdapter
 from .runtime import RuntimeIdentityError, resolve_executable, sanitized_environment
+from .safe_files import SafeFileError, open_relative_regular
 
 
 class _AdapterRegistry(Protocol):
@@ -604,16 +605,21 @@ def _run_buzz_git_command(argv: tuple[str, ...], repo_path: Path) -> tuple[int, 
 
 def _secure_nostr_keyfile(configured: str) -> bool:
     path = Path(configured).expanduser()
+    if not path.is_absolute():
+        return False
     try:
-        metadata = path.lstat()
-    except OSError:
+        relative = path.relative_to(Path("/")).as_posix()
+        descriptor = open_relative_regular(Path("/"), relative)
+    except (SafeFileError, ValueError):
         return False
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        return False
-    if hasattr(os, "geteuid") and metadata.st_uid != os.geteuid():
-        return False
-    mode = stat.S_IMODE(metadata.st_mode)
-    return bool(mode & stat.S_IRUSR) and not bool(mode & 0o177)
+    try:
+        metadata = os.fstat(descriptor)
+        if hasattr(os, "geteuid") and metadata.st_uid != os.geteuid():
+            return False
+        mode = stat.S_IMODE(metadata.st_mode)
+        return bool(mode & stat.S_IRUSR) and not bool(mode & 0o177)
+    finally:
+        os.close(descriptor)
 
 
 def inspect_buzz_git_auth(repo_path: str | Path, remote: str) -> dict[str, object]:
@@ -666,9 +672,17 @@ def inspect_buzz_git_auth(repo_path: str | Path, remote: str) -> dict[str, objec
             ):
                 issues.append("Buzz remote must be credential-free HTTPS without query or fragment")
             else:
-                remote_configured = True
-                remote_host = parsed.hostname
-                remote_url = urls[0]
+                try:
+                    port = parsed.port
+                except ValueError:
+                    issues.append("Buzz remote HTTPS authority is invalid")
+                else:
+                    host = parsed.hostname.lower()
+                    if ":" in host:
+                        host = f"[{host}]"
+                    remote_configured = True
+                    remote_host = f"{host}:{port}" if port is not None else host
+                    remote_url = urls[0]
 
     helper_host_scoped = False
     use_http_path = False

@@ -6,11 +6,14 @@ import os
 import re
 import subprocess
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from urllib.parse import quote
+from tempfile import TemporaryDirectory
+from urllib.parse import quote, urlsplit
 
 from ..runtime import resolve_executable, sanitized_environment
+from ..safe_files import SafeFileError, copy_private_regular
 from .base import (
     AdapterContext,
     AdapterError,
@@ -96,18 +99,89 @@ class GitRefAdapter:
             raise AdapterError("git.ref requires a full 40-character source SHA")
         return remote, ref, repo
 
+    @contextmanager
+    def _buzz_command_prefix(
+        self, context: AdapterContext, remote: str, repo: Path
+    ):
+        code, output = self.runner(
+            ("git", "remote", "get-url", "--all", remote), repo, ()
+        )
+        urls = [line.strip() for line in output.splitlines() if line.strip()]
+        if code != 0 or len(urls) != 1:
+            raise AdapterError("git connection verification requires a configured named remote")
+        parsed = urlsplit(urls[0])
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise AdapterError("buzz-git requires one credential-free HTTPS remote")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise AdapterError("buzz-git remote HTTPS authority is invalid") from exc
+        host = parsed.hostname.lower()
+        if ":" in host:
+            host = f"[{host}]"
+        authority = f"{host}:{port}" if port is not None else host
+        options = [
+            "git",
+            "-c",
+            "credential.helper=",
+            "-c",
+            f"credential.https://{authority}.helper=nostr",
+            "-c",
+            f"credential.https://{authority}.useHttpPath=true",
+        ]
+        if os.environ.get("NOSTR_PRIVATE_KEY"):
+            yield tuple(options)
+            return
+        code, output = self.runner(
+            ("git", "config", "--get", "nostr.keyfile"), repo, ()
+        )
+        keyfiles = [line.strip() for line in output.splitlines() if line.strip()]
+        if code != 0 or len(keyfiles) != 1:
+            raise AdapterError("Buzz Nostr private key source is unavailable")
+        keyfile = Path(keyfiles[0]).expanduser()
+        if not keyfile.is_absolute():
+            raise AdapterError("Buzz Nostr keyfile must be absolute")
+        with TemporaryDirectory(prefix="shipyard-buzz-auth-") as temporary:
+            private_copy = Path(temporary) / "nostr.key"
+            try:
+                copy_private_regular(keyfile, private_copy)
+            except SafeFileError as exc:
+                raise AdapterError("Buzz Nostr keyfile is unsafe") from exc
+            yield (*options, "-c", f"nostr.keyfile={private_copy}")
+
+    @contextmanager
+    def _git_command_prefix(
+        self, context: AdapterContext, remote: str, repo: Path
+    ):
+        if context.provider == "buzz-git":
+            with self._buzz_command_prefix(context, remote, repo) as command:
+                yield command
+        else:
+            yield ("git",)
+
     def check(self, context: AdapterContext) -> ConnectionCheck:
         remote, ref, repo = self._parameters(context)
-        remote_code, _remote_output = self.runner(
-            ("git", "remote", "get-url", "--", remote),
-            repo,
-            self._allowed_env(context),
-        )
-        if remote_code != 0:
-            raise AdapterError("git connection verification requires a configured named remote")
-        code, output = self.runner(
-            ("git", "ls-remote", remote, ref), repo, self._allowed_env(context)
-        )
+        with self._git_command_prefix(context, remote, repo) as command:
+            if context.provider != "buzz-git":
+                remote_code, _remote_output = self.runner(
+                    (*command, "remote", "get-url", "--", remote),
+                    repo,
+                    self._allowed_env(context),
+                )
+                if remote_code != 0:
+                    raise AdapterError(
+                        "git connection verification requires a configured named remote"
+                    )
+            code, output = self.runner(
+                (*command, "ls-remote", remote, ref), repo, self._allowed_env(context)
+            )
         if code != 0:
             raise AdapterError("Git remote verification failed")
         observed = None
@@ -124,11 +198,12 @@ class GitRefAdapter:
 
     def execute(self, context: AdapterContext) -> MutationReceipt:
         remote, ref, repo = self._parameters(context)
-        code, _output = self.runner(
-            ("git", "push", "--porcelain", remote, f"{context.source_sha}:{ref}"),
-            repo,
-            self._allowed_env(context),
-        )
+        with self._git_command_prefix(context, remote, repo) as command:
+            code, _output = self.runner(
+                (*command, "push", "--porcelain", remote, f"{context.source_sha}:{ref}"),
+                repo,
+                self._allowed_env(context),
+            )
         if code != 0:
             raise AdapterError("exact-ref git push failed; provider outcome requires readback")
         operation_id = _operation_id("git", remote, ref, context.source_sha)
@@ -144,9 +219,10 @@ class GitRefAdapter:
         self, context: AdapterContext, receipt: MutationReceipt
     ) -> ProviderReadback:
         remote, ref, repo = self._parameters(context)
-        code, output = self.runner(
-            ("git", "ls-remote", remote, ref), repo, self._allowed_env(context)
-        )
+        with self._git_command_prefix(context, remote, repo) as command:
+            code, output = self.runner(
+                (*command, "ls-remote", remote, ref), repo, self._allowed_env(context)
+            )
         if code != 0:
             return ProviderReadback("unknown", receipt.operation_id, None, {"ref": ref})
         observed = None

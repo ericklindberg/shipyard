@@ -245,10 +245,40 @@ class OciPromotionAdapter:
             },
         )
 
+    @staticmethod
+    def _receipt_coordinates(
+        context: AdapterContext,
+        receipt: MutationReceipt,
+        coordinates: _Coordinates,
+    ) -> _Coordinates:
+        expected_evidence = {
+            "destination": coordinates.destination,
+            "manifest_digest": coordinates.manifest_digest,
+            "target_tag": coordinates.target_tag,
+        }
+        expected_operation = "oci-" + hashlib.sha256(
+            (
+                f"{coordinates.destination}\0{coordinates.manifest_digest}"
+            ).encode()
+        ).hexdigest()[:24]
+        if (
+            receipt.provider != context.provider
+            or receipt.action != OciPromotionAdapter.action
+            or receipt.submitted_sha != context.source_sha
+            or receipt.operation_id != expected_operation
+            or receipt.evidence != expected_evidence
+        ):
+            raise AdapterError("OCI readback receipt identity does not match context")
+        return coordinates
+
     def readback(
         self, context: AdapterContext, receipt: MutationReceipt
     ) -> ProviderReadback:
-        coordinates = self._coordinates(context)
+        coordinates = self._receipt_coordinates(
+            context,
+            receipt,
+            self._coordinates(context),
+        )
         headers = self._headers(coordinates)
         try:
             response = self.transport.request(

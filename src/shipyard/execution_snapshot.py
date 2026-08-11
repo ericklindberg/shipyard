@@ -11,9 +11,15 @@ from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .candidate import ReleaseCandidate
+from .candidate import ReleaseCandidate, canonical_remote
 from .models import ReleaseRun
 from .runtime import resolve_executable, sanitized_environment
+from .safe_files import (
+    SafeFileError,
+    copy_private_regular,
+    open_relative_regular,
+    relative_parts,
+)
 
 
 class ExecutionSnapshotError(RuntimeError):
@@ -65,7 +71,49 @@ def _required_remotes(run: ReleaseRun) -> set[str]:
     return names
 
 
-def _remote_urls(run: ReleaseRun) -> dict[str, str]:
+def _approved_remote_urls(
+    run: ReleaseRun, candidate: ReleaseCandidate
+) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    source = candidate.payload.get("source")
+    if run.source.remote_url:
+        repository = source.get("repository") if isinstance(source, dict) else None
+        if not isinstance(repository, str) or not repository:
+            raise ExecutionSnapshotError("candidate source remote evidence is malformed")
+        expected["origin"] = repository
+
+    playbook = candidate.payload.get("playbook")
+    actions = playbook.get("actions") if isinstance(playbook, dict) else None
+    if not isinstance(actions, list):
+        raise ExecutionSnapshotError("candidate action evidence is malformed")
+    by_id = {
+        item.get("id"): item
+        for item in actions
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    if len(by_id) != len(actions):
+        raise ExecutionSnapshotError("candidate action evidence is malformed")
+    for step in run.steps:
+        remote_key = {
+            "git.ref": "remote",
+            "xcodecloud.build": "source_remote",
+        }.get(step.action or "")
+        if remote_key is None:
+            continue
+        remote = step.config.get(remote_key)
+        item = by_id.get(step.id)
+        resolved = item.get("resolved") if isinstance(item, dict) else None
+        approved = resolved.get("remote_url") if isinstance(resolved, dict) else None
+        if not isinstance(remote, str) or not isinstance(approved, str) or not approved:
+            raise ExecutionSnapshotError("candidate action remote evidence is malformed")
+        prior = expected.setdefault(remote, approved)
+        if prior != approved:
+            raise ExecutionSnapshotError("candidate remote evidence is inconsistent")
+    return expected
+
+
+def _remote_urls(run: ReleaseRun, candidate: ReleaseCandidate) -> dict[str, str]:
+    expected = _approved_remote_urls(run, candidate)
     result: dict[str, str] = {}
     for name in sorted(_required_remotes(run)):
         output = _git(run.repo_path, "remote", "get-url", "--all", name, timeout=10)
@@ -73,6 +121,10 @@ def _remote_urls(run: ReleaseRun) -> dict[str, str]:
         if len(urls) != 1:
             raise ExecutionSnapshotError(
                 "execution snapshot requires exactly one URL for each named Git remote"
+            )
+        if canonical_remote(urls[0]) != expected.get(name):
+            raise ExecutionSnapshotError(
+                "Git remote changed after candidate approval"
             )
         result[name] = urls[0]
     return result
@@ -124,6 +176,7 @@ def _copy_buzz_auth_config(source: Path, snapshot: Path, remote_url: str) -> Non
         raise ExecutionSnapshotError(
             "Buzz snapshot requires host-scoped nostr helper and useHttpPath=true"
         )
+    _git(snapshot, "config", "--local", "--add", "credential.helper", "")
     _git(snapshot, "config", "--local", helper_key, "nostr")
     _git(snapshot, "config", "--local", path_key, "true")
 
@@ -132,18 +185,16 @@ def _copy_buzz_auth_config(source: Path, snapshot: Path, remote_url: str) -> Non
         if len(keyfiles) != 1:
             raise ExecutionSnapshotError("Buzz snapshot requires one Nostr keyfile reference")
         keyfile = Path(keyfiles[0]).expanduser()
+        if not keyfile.is_absolute():
+            raise ExecutionSnapshotError("Buzz Nostr keyfile must be absolute")
+        credential_directory = snapshot / ".git" / "shipyard-credentials"
         try:
-            metadata = keyfile.lstat()
-        except OSError as exc:
-            raise ExecutionSnapshotError("Buzz Nostr keyfile is unavailable") from exc
-        if (
-            stat.S_ISLNK(metadata.st_mode)
-            or not stat.S_ISREG(metadata.st_mode)
-            or (hasattr(os, "geteuid") and metadata.st_uid != os.geteuid())
-            or stat.S_IMODE(metadata.st_mode) & 0o177
-        ):
-            raise ExecutionSnapshotError("Buzz Nostr keyfile is unsafe")
-        _git(snapshot, "config", "--local", "nostr.keyfile", str(keyfile.resolve()))
+            credential_directory.mkdir(mode=0o700)
+            private_copy = credential_directory / "nostr.key"
+            copy_private_regular(keyfile, private_copy)
+        except (OSError, SafeFileError) as exc:
+            raise ExecutionSnapshotError("Buzz Nostr keyfile is unsafe") from exc
+        _git(snapshot, "config", "--local", "nostr.keyfile", str(private_copy))
     elif not os.environ.get("NOSTR_PRIVATE_KEY"):
         raise ExecutionSnapshotError("Buzz Nostr private key source is unavailable")
 
@@ -167,19 +218,12 @@ def _copy_approved_artifact(
         or _SHA256.fullmatch(expected_digest) is None
     ):
         raise ExecutionSnapshotError("candidate artifact evidence is malformed")
-    source = source_root / relative
-    destination = snapshot_root / relative
     try:
-        source.resolve(strict=False).relative_to(source_root)
-        destination.resolve(strict=False).relative_to(snapshot_root)
-    except ValueError as exc:
+        parts = relative_parts(relative)
+        descriptor = open_relative_regular(source_root, relative)
+    except SafeFileError as exc:
         raise ExecutionSnapshotError("candidate artifact escapes execution snapshot") from exc
-
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(source, flags)
-    except OSError as exc:
-        raise ExecutionSnapshotError("candidate artifact cannot be snapshotted safely") from exc
+    destination = snapshot_root.joinpath(*parts)
     temporary_path: Path | None = None
     try:
         metadata = os.fstat(descriptor)
@@ -224,12 +268,11 @@ def prepare_execution_snapshot(
     snapshots.mkdir(mode=0o700, exist_ok=True)
     os.chmod(snapshots, 0o700)
     final = snapshots / run.run_id
-    if final.exists():
-        if final.is_symlink() or not final.is_dir():
-            raise ExecutionSnapshotError("execution snapshot path is unsafe")
+    if os.path.lexists(final):
+        _validate_frozen_snapshot(final, run.source.sha)
         return replace(run, repo_path=final.resolve())
 
-    remotes = _remote_urls(run)
+    remotes = _remote_urls(run, candidate)
     temporary = Path(tempfile.mkdtemp(prefix=f".{run.run_id}-", dir=snapshots))
     repository = temporary / "repository"
     try:
@@ -270,6 +313,25 @@ def prepare_execution_snapshot(
         raise
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
+
+
+def _validate_frozen_snapshot(snapshot: Path, source_sha: str) -> None:
+    if snapshot.is_symlink() or not snapshot.is_dir():
+        raise ExecutionSnapshotError("execution snapshot path is unsafe")
+    metadata = snapshot.stat()
+    if (
+        (hasattr(os, "geteuid") and metadata.st_uid != os.geteuid())
+        or stat.S_IMODE(metadata.st_mode) & 0o222
+    ):
+        raise ExecutionSnapshotError("pre-existing execution snapshot is not frozen")
+    for path in snapshot.rglob("*"):
+        item = path.lstat()
+        if hasattr(os, "geteuid") and item.st_uid != os.geteuid():
+            raise ExecutionSnapshotError("execution snapshot has an unexpected owner")
+        if not stat.S_ISLNK(item.st_mode) and stat.S_IMODE(item.st_mode) & 0o222:
+            raise ExecutionSnapshotError("pre-existing execution snapshot is not frozen")
+    if _git(snapshot, "rev-parse", "HEAD") != source_sha:
+        raise ExecutionSnapshotError("execution snapshot source SHA changed")
 
 
 def execution_snapshot_run(state_dir: Path, run: ReleaseRun) -> ReleaseRun:
