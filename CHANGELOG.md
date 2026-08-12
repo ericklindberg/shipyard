@@ -2,9 +2,9 @@
 
 All notable changes to Shipyard will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The public API remains pre-1.0.
 
-## [Unreleased]
+## 0.6.0
 
-## [0.6.0] - 2026-08-12
+This section describes version 0.6.0. The [latest GitHub release](https://github.com/ericklindberg/shipyard/releases/latest) is authoritative for publication status.
 
 ### Added
 
@@ -187,7 +187,9 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 - Initial local-first exact-SHA release orchestration MVP.
 
-[Unreleased]: https://github.com/ericklindberg/shipyard/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ericklindberg/shipyard/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/ericklindberg/shipyard/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/ericklindberg/shipyard/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ericklindberg/shipyard/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ericklindberg/shipyard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ericklindberg/shipyard/releases/tag/v0.3.0

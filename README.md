@@ -6,6 +6,8 @@ Shipyard coordinates deployment tools; it does not bypass repository governance,
 
 **Project status:** pre-1.0 beta. The local ledger, exact-SHA authorization, Git/GitHub/Buzz promotion, GitHub Actions adoption, Xcode Cloud/TestFlight internal-canary path, physical-device gate contract, and offline evidence/dossier verifiers are exercised by deterministic tests and release dogfood. OCI, Kubernetes, Render, Heroku, Vercel, and Buzz workflow adapters remain beta pending operator-run live-target validation.
 
+**Review status:** development and review for version 0.6.0 are tracked in [PR #1](https://github.com/ericklindberg/shipyard/pull/1). While that PR is open, its body is the canonical live review record: it identifies the exact candidate SHA, hosted CI, artifact hashes, validation results, and intentionally unavailable provider claims. The [latest published release](https://github.com/ericklindberg/shipyard/releases/latest) is always authoritative for what is publicly released. A package version in candidate source is not by itself a release claim.
+
 ## Why Shipyard
 
 A deployment is more than a command exiting zero. Shipyard binds authorization to:
@@ -19,28 +21,50 @@ A deployment is more than a command exiting zero. Shipyard binds authorization t
 
 If any bound evidence changes, the approval becomes invalid. Ambiguous external outcomes are quarantined as `uncertain` and are never automatically retried.
 
-## Install
+## Install and review
 
-Python 3.11+ on a POSIX host is required. Install the current signed release wheel directly from GitHub:
+Python 3.11+ on a POSIX host is required.
+
+For the current public distribution, open https://github.com/ericklindberg/shipyard/releases/latest and download the original wheel plus `SHA256SUMS`. Keep the canonical wheel filename unchanged, verify its checksum, then install that local file:
 
 ```bash
-uv tool install https://github.com/ericklindberg/shipyard/releases/download/v0.6.0/shipyard_release-0.6.0-py3-none-any.whl
+uv tool install ./shipyard_release-VERSION-py3-none-any.whl
 shipyard version --json
 shipyard doctor /path/to/repository --json
 ```
 
-Keep the canonical wheel filename unchanged. Shipyard's Linux/macOS release gate installs that exact wheel with its hash-locked runtime dependencies, requires `shipyard version --json` to report the embedded exact source SHA, and exercises the installed CLI through governed quickstart and aggregate-dossier verification.
-
-For provenance-sensitive environments, download the wheel and `SHA256SUMS` from the [v0.6.0 release](https://github.com/ericklindberg/shipyard/releases/tag/v0.6.0), verify the checksum, and verify GitHub's artifact attestation before installation. Shipyard's own release workflow never publishes or deploys automatically.
-
-For development from a source checkout:
+If the release includes GitHub artifact attestations, verify the downloaded wheel before installation:
 
 ```bash
-uv sync --extra dev
+gh attestation verify ./shipyard_release-VERSION-py3-none-any.whl \
+  --repo ericklindberg/shipyard
+```
+
+Starting with version 0.6.0, the Linux/macOS release gate installs the canonical wheel with its hash-locked runtime dependencies, requires `shipyard version --json` to report the embedded exact source SHA, and exercises the installed CLI through governed quickstart and aggregate-dossier verification. Shipyard's workflows generate evidence but never publish or deploy automatically.
+
+To inspect version 0.6.0 while PR #1 is still open, use the exact SHA recorded in [the PR body](https://github.com/ericklindberg/shipyard/pull/1):
+
+```bash
+EXPECTED_SHA="replace-with-the-40-character-SHA-from-PR-1"
+git clone https://github.com/ericklindberg/shipyard.git
+cd shipyard
+git fetch origin pull/1/head
+test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_SHA"
+git switch --detach "$EXPECTED_SHA"
+test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+uv sync --extra dev --locked
+uv run shipyard version --json
+uv run shipyard quickstart ./shipyard-quickstart --json
+```
+
+For normal development from a source checkout:
+
+```bash
+uv sync --extra dev --locked
 uv run pytest -q
-uv run ruff check src tests
-uv run ty check src
-uv build
+uv run ruff check src tests scripts
+uv run ty check src scripts
+python scripts/build_release_artifacts.py --directory dist
 ```
 
 Prove the complete governed path without credentials or network access:

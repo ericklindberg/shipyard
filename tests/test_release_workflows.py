@@ -7,15 +7,41 @@ from shipyard import __version__
 ROOT = Path(__file__).parents[1]
 
 
-def test_readme_install_url_tracks_the_release_version():
+def test_reviewer_install_guidance_does_not_claim_an_unpublished_release():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    release_url = (
+    guide = (ROOT / "docs" / "STANDALONE_RELEASE.md").read_text(encoding="utf-8")
+    unpublished_wheel_url = (
         "https://github.com/ericklindberg/shipyard/releases/download/"
         f"v{__version__}/shipyard_release-{__version__}-py3-none-any.whl"
     )
 
-    assert release_url in readme
-    assert f"[v{__version__} release]" in readme
+    assert unpublished_wheel_url not in readme
+    assert unpublished_wheel_url not in guide
+    assert "current signed release" not in readme
+    assert "original wheel filename from the signed GitHub release" not in guide
+    assert "https://github.com/ericklindberg/shipyard/releases/latest" in readme
+    assert "https://github.com/ericklindberg/shipyard/pull/1" in readme
+    assert "uv sync --extra dev --locked" in readme
+    assert "If the release includes GitHub artifact attestations" in readme
+    assert "Starting with version 0.6.0" in readme
+    assert "currently published 0.5.2 wheel reports embedded source identity" not in readme
+    assert "<version>" not in readme
+    assert "<version>" not in guide
+    assert 'EXPECTED_SHA="replace-with-the-40-character-SHA-from-PR-1"' in readme
+    assert 'test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_SHA"' in readme
+    assert 'git switch --detach "$EXPECTED_SHA"' in readme
+
+
+def test_changelog_does_not_prematurely_date_the_candidate():
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert f"## [{__version__}] -" not in changelog
+    assert f"## {__version__}" in changelog
+    assert "latest GitHub release" in changelog
+    assert (
+        "[0.5.2]: https://github.com/ericklindberg/shipyard/compare/v0.5.1...v0.5.2"
+        in changelog
+    )
 
 
 def test_standalone_release_guide_covers_complete_explicit_control_lifecycle():

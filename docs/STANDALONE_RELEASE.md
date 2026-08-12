@@ -4,15 +4,16 @@ Shipyard 0.6.0 can operate a governed release from one installed local CLI witho
 
 ## 1. Install the canonical artifact
 
-Use the original wheel filename from the signed GitHub release. Do not rename it:
+For a published version, download the original wheel and `SHA256SUMS` from https://github.com/ericklindberg/shipyard/releases/latest. Do not rename the wheel. Verify its checksum—and its GitHub artifact attestation when the release provides one—before installing the local file:
 
 ```bash
-uv tool install \
-  https://github.com/ericklindberg/shipyard/releases/download/v0.6.0/shipyard_release-0.6.0-py3-none-any.whl
+uv tool install ./shipyard_release-VERSION-py3-none-any.whl
 shipyard version --json
 ```
 
-The repository release gate installs that same canonical wheel plus its hash-locked runtime dependency closure into a clean Linux and macOS environment. It runs the installed binary through quickstart, child-evidence verification, release-project validation, aggregate dossier export, and offline dossier verification.
+Before version 0.6.0 is published, reviewers should instead use a clean checkout of the exact candidate SHA identified in [PR #1](https://github.com/ericklindberg/shipyard/pull/1), run `uv sync --extra dev --locked`, and invoke the CLI as `uv run shipyard`. Candidate source is not a substitute for a released, checksum-verified artifact.
+
+The repository release gate installs the canonical wheel plus its hash-locked runtime dependency closure into a clean Linux and macOS environment. It runs the installed binary through quickstart, child-evidence verification, release-project validation, aggregate dossier export, and offline dossier verification.
 
 ## 2. Create one non-secret release project
 
