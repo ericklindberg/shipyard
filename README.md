@@ -77,6 +77,23 @@ This creates disposable local Git repositories, prepares and approves an exact
 candidate, performs one real local ref mutation, reads it back independently,
 exports evidence, and verifies that evidence offline.
 
+Screen an iOS submission manifest for common, deterministic App Review rejection
+risks without credentials, network access, or App Store Connect mutation:
+
+```bash
+cp examples/app-review-preflight.json ./app-review.json
+# Edit only non-secret submission facts; never put reviewer passwords or tokens here.
+shipyard app-review preflight ./app-review.json --json
+```
+
+The result is `ready`, `review`, or `blocked` and includes stable finding IDs,
+severity, evidence, and remediation. Checks cover review access, metadata/screenshots,
+privacy/support URLs and disclosures, in-app account deletion, digital-goods payment,
+purchase restoration, Sign in with Apple parity, special hardware, encryption export
+compliance, and user-generated-content safeguards. This is advisory risk screening:
+it does not inspect a signed binary or live App Store Connect record, submit an app,
+interpret every guideline exception, predict discretionary review, or guarantee approval.
+
 ## Five-minute workflow
 
 Configure a reusable, per-user connection without storing its credential value:
@@ -150,6 +167,8 @@ Schema version 2 is the production path. It forbids raw external argv and routes
 - `vercel.deploy` — exact Git SHA deployment and deployment readback.
 - `xcodecloud.build` — candidate-tag-bound Xcode Cloud dispatch and source-commit readback;
 - `appstoreconnect.testflight` — identity-bound TestFlight build/group adoption and readback;
+- `app-review preflight` — offline advisory rejection-risk screening from an explicit
+  secret-free submission manifest; it is not a provider adapter or submission action;
 - `oci.promote` — exact manifest/config/source verification, one tag PUT, and digest readback;
 - `kubernetes.deploy` — independent OCI source verification plus UID/resourceVersion-bound immutable-image rollout.
 

@@ -161,6 +161,27 @@ The run receipt stores the Apple build-run ID. Readback requires Apple `sourceCo
 
 Keep Xcode Cloud and TestFlight as separately approved runs when they have different destination locks. Internal-canary operation has one retained live acceptance case; repeatable disposable validation remains desirable. External TestFlight is adapter-blocked without an exact-SHA physical-device attestation, and App Store submission is not implemented by this path.
 
+### App Review rejection-risk preflight
+
+Shipyard can screen operator-supplied submission facts for common deterministic risks
+before an App Store submission exists:
+
+```bash
+cp examples/app-review-preflight.json ./app-review.json
+shipyard app-review preflight ./app-review.json --json
+```
+
+The command is offline, read-only, deterministic, and rejects secret-bearing field
+names so reviewer passwords and tokens are not normalized into project artifacts.
+`blocked` exits `1`; `review` and `ready` exit `0`. Every finding includes a stable ID,
+severity, evidence from the manifest, and remediation.
+
+This preflight is evidence-based advisory screening, not an Apple provider claim. It
+does not inspect a signed archive, query or mutate App Store Connect, submit for App
+Review, resolve legal/guideline exceptions, or guarantee approval. Operators must
+reconcile its output with the current Apple App Review Guidelines and the actual
+submitted binary/metadata. App Store submission remains intentionally unimplemented.
+
 ## OCI registry beta adapter
 
 `oci.promote` is a separate run whose global destination is the exact registry tag:

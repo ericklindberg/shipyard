@@ -27,6 +27,9 @@ This section describes version 0.6.0. The [latest GitHub release](https://github
   canonical wheel and source archive byte-identical across independent builds.
 - Embedded the canonical build source SHA in installed wheel runtime identity and
   required Linux/macOS smoke gates to match it to the approved candidate.
+- Added `shipyard app-review preflight`, a deterministic offline advisory screen for
+  common App Review rejection risks using a strict secret-free submission manifest,
+  stable finding IDs, evidence, remediation, and explicit no-guarantee boundaries.
 
 ### Changed
 

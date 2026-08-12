@@ -14,6 +14,7 @@ from typing import Any, NoReturn
 
 from .adapters.base import AdapterError
 from .adapters.registry import AdapterRegistry
+from .app_review_preflight import AppReviewPreflightError, run_app_review_preflight
 from .apple_release import (
     AppleReleaseCoordinates,
     render_testflight_playbook,
@@ -653,6 +654,18 @@ def _build_parser() -> argparse.ArgumentParser:
     quickstart_parser.add_argument("directory", nargs="?", default="shipyard-quickstart")
     quickstart_parser.add_argument("--json", action="store_true")
 
+    app_review_parser = subparsers.add_parser(
+        "app-review", help="Run local advisory App Review rejection-risk checks"
+    )
+    app_review_subparsers = app_review_parser.add_subparsers(
+        dest="app_review_command", required=True, parser_class=ShipyardArgumentParser
+    )
+    app_review_preflight = app_review_subparsers.add_parser(
+        "preflight", help="Assess an explicit submission manifest without network access"
+    )
+    app_review_preflight.add_argument("manifest")
+    app_review_preflight.add_argument("--json", action="store_true")
+
     bootstrap_parser = subparsers.add_parser(
         "bootstrap", help="Generate safe integration files without network access"
     )
@@ -1279,6 +1292,10 @@ def main(argv: list[str] | None = None) -> int:
                 as_json=args.json,
             )
             return 0
+        if args.command == "app-review":
+            payload = run_app_review_preflight(args.manifest)
+            _print(payload, as_json=args.json)
+            return 1 if payload["status"] == "blocked" else 0
         if args.command == "release":
             operation = args.release_command
             if operation in {"init", "project"} and (
@@ -1827,6 +1844,7 @@ def main(argv: list[str] | None = None) -> int:
         return 4
     except (
         AdapterError,
+        AppReviewPreflightError,
         ApprovalPacketError,
         AuthorizationError,
         CandidateError,

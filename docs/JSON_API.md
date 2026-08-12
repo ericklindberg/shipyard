@@ -31,6 +31,12 @@ Verification commands are stricter: a parsed but invalid evidence or dossier ver
 `ok: false`, `status: invalid`, preserves the complete verifier report in `data`, and exits
 nonzero.
 
+`app-review preflight` is a valid advisory result when `data.status` is `ready`,
+`review`, or `blocked`. A blocked result exits `1` while retaining `ok: true` because
+the manifest was successfully assessed; configuration/schema errors use the error
+envelope and exit `2`. Consumers must not interpret any preflight status as an Apple
+approval prediction, App Store Connect readback, or submission result.
+
 ## Error envelope
 
 Handled Shipyard errors are written to standard error:

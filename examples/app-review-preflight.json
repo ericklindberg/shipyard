@@ -1,0 +1,46 @@
+{
+  "schema_version": "shipyard.app-review-preflight/v1",
+  "app": {
+    "name": "Example",
+    "bundle_id": "com.example.app",
+    "version": "1.0",
+    "build_number": "1"
+  },
+  "submission": {
+    "metadata_complete": true,
+    "screenshots_current": true,
+    "known_crashes": false,
+    "placeholder_content": false,
+    "broken_links": false
+  },
+  "review_access": {
+    "requires_login": false,
+    "demo_account_available": false,
+    "review_notes_complete": true,
+    "requires_special_hardware": false,
+    "hardware_instructions_complete": false
+  },
+  "privacy": {
+    "privacy_policy_url": "https://example.com/privacy",
+    "support_url": "https://example.com/support",
+    "data_collection_disclosed": true,
+    "privacy_manifest_present": true,
+    "account_creation": false,
+    "account_deletion_available": false
+  },
+  "commerce": {
+    "digital_goods": false,
+    "uses_in_app_purchase": false,
+    "restore_purchases_available": false
+  },
+  "authentication": {
+    "third_party_login": false,
+    "sign_in_with_apple_available": false
+  },
+  "compliance": {
+    "uses_encryption": false,
+    "export_compliance_documented": false,
+    "user_generated_content": false,
+    "moderation_controls_available": false
+  }
+}
