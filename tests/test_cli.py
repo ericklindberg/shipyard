@@ -8,15 +8,58 @@ import sys
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from shipyard import cli
 from shipyard.adapters.base import AdapterStatus, ProviderReadback
+from shipyard.gitops import GitError, RepositorySnapshot
+from shipyard.observations import ObservationStore, ReleaseObservation
+from shipyard.quickstart import run_quickstart
+from shipyard.release_inspection import ProviderInspection, ReleaseInspection
+from shipyard.release_project import load_release_project
 
 
 def json_data(text: str):
     envelope = json.loads(text)
     assert envelope["api_version"] == "shipyard.cli/v1"
     assert envelope["ok"] is True
+    assert isinstance(envelope["status"], str)
     return envelope["data"]
+
+
+def test_release_project_source_identity_matches_https_and_ssh_transports(tmp_path):
+    snapshot = RepositorySnapshot(
+        path=tmp_path,
+        sha="a" * 40,
+        branch=None,
+        dirty=False,
+        changed_paths=(),
+        remote_url="git@github.com:example/example.git",
+        upstream_sha=None,
+        worktree_digest=None,
+    )
+
+    cli._verify_release_project_source(
+        "https://github.com/example/example.git", snapshot
+    )
+
+
+def test_release_project_source_identity_rejects_different_repository(tmp_path):
+    snapshot = RepositorySnapshot(
+        path=tmp_path,
+        sha="a" * 40,
+        branch=None,
+        dirty=False,
+        changed_paths=(),
+        remote_url="git@github.com:example/other.git",
+        upstream_sha=None,
+        worktree_digest=None,
+    )
+
+    with pytest.raises(GitError, match="source_remote does not match"):
+        cli._verify_release_project_source(
+            "https://github.com/example/example.git", snapshot
+        )
 
 
 def run_cli(args, *, cwd: Path):
@@ -235,6 +278,230 @@ def test_github_bootstrap_cli_writes_real_workflow_and_playbook(tmp_path):
     assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in workflow
 
 
+def _release_project(path: Path) -> Path:
+    path.write_text(
+        '''schema_version = 1
+name = "cli-release"
+source_remote = "https://github.com/example/example.git"
+
+[apple]
+workflow_id = "workflow-1"
+source_remote = "https://github.com/example/example.git"
+source_git_remote = "origin"
+bundle_id = "com.example.app"
+beta_group_name = "Testing"
+expected_marketing_version = "1.1"
+token_env = "APPLE_ASC_TOKEN"
+
+[[gates]]
+name = "physical-device"
+required_for = ["external", "production"]
+''',
+        encoding="utf-8",
+    )
+    path.chmod(0o644)
+    return path
+
+
+def test_release_init_cli_creates_parseable_secret_free_project(tmp_path):
+    output = tmp_path / "shipyard.release.toml"
+
+    result = run_cli(
+        ["release", "init", "--output", str(output), "--json"], cwd=tmp_path
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json_data(result.stdout)
+    assert payload["secrets_stored"] is False
+    assert output.is_file()
+    assert load_release_project(output).apple is not None
+    assert "PRIVATE KEY" not in output.read_text(encoding="utf-8")
+
+
+def test_release_project_namespace_init_validate_show_is_offline_and_redacted(tmp_path):
+    output = tmp_path / "shipyard.release.toml"
+
+    initialized = run_cli(
+        ["release", "project", "init", str(output), "--json"], cwd=tmp_path
+    )
+    validated = run_cli(
+        ["release", "project", "validate", str(output), "--json"], cwd=tmp_path
+    )
+    shown = run_cli(
+        ["release", "project", "show", str(output), "--json"], cwd=tmp_path
+    )
+
+    assert initialized.returncode == 0, initialized.stderr
+    assert validated.returncode == 0, validated.stderr
+    assert shown.returncode == 0, shown.stderr
+    for result in (validated, shown):
+        payload = json_data(result.stdout)
+        assert payload["valid"] is True
+        assert payload["offline"] is True
+        assert payload["provider_mutations"] == 0
+        assert "PRIVATE KEY" not in result.stdout
+
+
+def test_release_observation_namespace_lists_and_shows_without_network(tmp_path):
+    project_path = _release_project(tmp_path / "shipyard.release.toml")
+    project = load_release_project(project_path)
+    state = tmp_path / "state"
+    observation = ReleaseObservation.create(
+        "github",
+        project.digest,
+        "a" * 40,
+        ProviderReadback(
+            "succeeded",
+            "github-checks",
+            "a" * 40,
+            {"read_only": True},
+        ),
+        observed_at="2026-08-12T12:00:00Z",
+    )
+    path = ObservationStore(state).save(observation)
+
+    listed = run_cli(
+        [
+            "release",
+            "observation",
+            "list",
+            "--project",
+            str(project_path),
+            "--state-dir",
+            str(state),
+            "--json",
+        ],
+        cwd=tmp_path,
+    )
+    shown = run_cli(
+        [
+            "release",
+            "observation",
+            "show",
+            str(path),
+            "--state-dir",
+            str(state),
+            "--json",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert listed.returncode == 0, listed.stderr
+    listed_payload = json_data(listed.stdout)
+    assert listed_payload["count"] == 1
+    assert listed_payload["observations"][0]["observation_sha256"] == observation.digest
+    assert listed_payload["provider_mutations"] == 0
+    assert shown.returncode == 0, shown.stderr
+    shown_payload = json_data(shown.stdout)
+    assert shown_payload["observation"]["observation_sha256"] == observation.digest
+    assert shown_payload["provider_mutations"] == 0
+
+
+def test_release_playbook_cli_uses_verified_observation_not_raw_ids(tmp_path, monkeypatch):
+    project_path = _release_project(tmp_path / "shipyard.release.toml")
+    project = load_release_project(project_path)
+    state = tmp_path / "state"
+    source_sha = "a" * 40
+    observation = ReleaseObservation.create(
+        "apple",
+        project.digest,
+        source_sha,
+        ProviderReadback(
+            "succeeded",
+            "run-609",
+            source_sha,
+            {
+                "workflow_id": "workflow-1",
+                "repository_id": "repository-1",
+                "repository_identity": "github.com/example/example",
+                "git_reference_id": "reference-1",
+                "git_reference_name": f"refs/tags/shipyard-candidate-{source_sha}",
+                "app_id": "app-1",
+                "bundle_id": "com.example.app",
+                "run_id": "run-609",
+                "run_number": "609",
+                "build_id": "build-609",
+                "build_number": "609",
+                "processing_state": "VALID",
+                "expired": False,
+                "pre_release_version_id": "version-1",
+                "marketing_version": "1.1",
+                "beta_group_id": "group-testing",
+                "beta_group_name": "Testing",
+                "beta_group_internal": True,
+                "relationship_present": False,
+                "internal_build_state": "READY_FOR_BETA_TESTING",
+                "external_build_state": "READY_FOR_BETA_SUBMISSION",
+            },
+        ),
+        observed_at="2026-08-12T12:00:00Z",
+    )
+    observation_path = ObservationStore(state).save(observation)
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    output = tmp_path / "testflight.toml"
+
+    result = run_cli(
+        [
+            "release",
+            "playbook",
+            "--project",
+            str(project_path),
+            "--source-sha",
+            source_sha,
+            "--apple-observation",
+            str(observation_path),
+            "--state-dir",
+            str(state),
+            "--output",
+            str(output),
+            "--json",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json_data(result.stdout)
+    assert payload["provider_mutations"] == 0
+    assert payload["requires_candidate_approval"] is True
+    content = output.read_text(encoding="utf-8")
+    assert 'build_id = "build-609"' in content
+    assert "secret-token" not in content
+
+
+def test_release_dossier_cli_exports_and_offline_verifies(tmp_path):
+    quickstart = run_quickstart(tmp_path / "quickstart")
+    project_path = _release_project(tmp_path / "shipyard.release.toml")
+    output = tmp_path / "dossier.tar"
+
+    exported = run_cli(
+        [
+            "release",
+            "dossier",
+            "export",
+            "--project",
+            str(project_path),
+            "--source-sha",
+            quickstart.source_sha,
+            "--scope",
+            "internal",
+            "--run",
+            f"candidate={quickstart.evidence_path}",
+            "--output",
+            str(output),
+            "--json",
+        ],
+        cwd=tmp_path,
+    )
+    verified = run_cli(
+        ["release", "dossier", "verify", str(output), "--json"], cwd=tmp_path
+    )
+
+    assert exported.returncode == 0, exported.stderr
+    assert json_data(exported.stdout)["valid"] is True
+    assert verified.returncode == 0, verified.stderr
+    assert json_data(verified.stdout)["runs_verified"] == 1
+
+
 def test_wait_cli_uses_readback_once_without_resolve(monkeypatch, tmp_path, capsys):
     statuses = iter(["pending", "succeeded"])
 
@@ -271,6 +538,81 @@ def test_wait_cli_uses_readback_once_without_resolve(monkeypatch, tmp_path, caps
     payload = json_data(capsys.readouterr().out)
     assert payload["state"] == "succeeded"
     assert payload["polls"] == 2
+
+
+def test_release_wait_polls_shared_inspection_without_persisting(
+    monkeypatch, git_repo, tmp_path, capsys
+):
+    project_path = _release_project(tmp_path / "shipyard.release.toml")
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/example/example.git"],
+        cwd=git_repo,
+        check=True,
+    )
+    statuses = iter(["pending", "succeeded"])
+
+    def fake_inspect(project, source_sha, **kwargs):
+        status = cast(AdapterStatus, next(statuses))
+        return ReleaseInspection(
+            source_sha,
+            (
+                ProviderInspection(
+                    "github",
+                    ProviderReadback(status, "github-checks", source_sha, {"read_only": True}),
+                ),
+            ),
+        )
+
+    class ForbiddenStore:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("release wait must not create an observation store")
+
+    monkeypatch.setattr(cli, "inspect_release", fake_inspect)
+    monkeypatch.setattr(cli, "ObservationStore", ForbiddenStore)
+
+    code = cli.main(
+        [
+            "release",
+            "wait",
+            str(git_repo),
+            "--project",
+            str(project_path),
+            "--provider",
+            "github",
+            "--allow-network",
+            "--timeout",
+            "1",
+            "--interval",
+            "0.01",
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["status"] == "succeeded"
+    payload = envelope["data"]
+    assert payload["persisted"] is False
+    assert payload["provider_mutations"] == 0
+    assert payload["polls"] == 2
+
+
+def test_invalid_json_invocation_emits_one_structured_document(tmp_path):
+    result = run_cli(
+        ["release", "playbook", "--json"],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    envelope = json.loads(result.stderr)
+    assert envelope["api_version"] == "shipyard.cli/v1"
+    assert envelope["ok"] is False
+    assert envelope["status"] == "invalid"
+    assert envelope["data"] is None
+    assert envelope["error"]["code"] == "INVALID_ARGUMENT"
+    assert envelope["error"]["retryable"] is False
+    assert envelope["error"]["mutation"] == "none"
 
 
 def test_signed_approval_cli_round_trip_binds_current_ledger_candidate(

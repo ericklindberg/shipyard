@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import os
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+from ..apple_auth import apple_headers, validate_apple_credential_references
 from ..runtime import resolve_executable, sanitized_environment
 from .base import (
     AdapterContext,
@@ -187,6 +187,257 @@ def _relationship_ids_or_related(
     raise AdapterError(f"{operation} pagination exceeded the page limit")
 
 
+def _relationship_resources_or_related(
+    transport: HttpTransport,
+    headers: dict[str, str],
+    resource: dict[str, object],
+    *,
+    parent_type: str,
+    parent_id: str,
+    relationship: str,
+    expected_type: str,
+    operation: str,
+    max_pages: int = 20,
+) -> list[dict[str, object]]:
+    relationships = resource.get("relationships")
+    if relationships is not None and not isinstance(relationships, dict):
+        raise AdapterError(f"{operation} returned malformed relationship data")
+    entry = relationships.get(relationship) if isinstance(relationships, dict) else None
+    if entry is not None and not isinstance(entry, dict):
+        raise AdapterError(f"{operation} returned malformed relationship data")
+    data = entry.get("data") if isinstance(entry, dict) else None
+    if isinstance(data, list):
+        inline: list[dict[str, object]] = []
+        seen_ids: set[str] = set()
+        for item in data:
+            if (
+                not isinstance(item, dict)
+                or item.get("type") != expected_type
+                or not isinstance(item.get("id"), str)
+                or _RESOURCE_ID.fullmatch(item["id"]) is None
+                or item["id"] in seen_ids
+            ):
+                raise AdapterError(f"{operation} returned malformed relationship data")
+            seen_ids.add(item["id"])
+            inline.append(item)
+        if all(isinstance(item.get("attributes"), dict) for item in inline):
+            return inline
+    elif data is not None:
+        raise AdapterError(f"{operation} returned malformed relationship data")
+
+    expected_path = (
+        f"/v1/{quote(parent_type, safe='')}/{quote(parent_id, safe='')}"
+        f"/{quote(relationship, safe='')}"
+    )
+    url = f"{_APPLE_API}{expected_path}"
+    seen_urls: set[str] = set()
+    seen_ids: set[str] = set()
+    result: list[dict[str, object]] = []
+    for _page in range(max_pages):
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "api.appstoreconnect.apple.com"
+            or parsed.path != expected_path
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or url in seen_urls
+        ):
+            raise AdapterError(f"{operation} pagination URL is invalid")
+        seen_urls.add(url)
+        response = transport.request("GET", url, headers=headers)
+        if not 200 <= response.status < 300:
+            raise AdapterError(f"{operation} failed with status {response.status}")
+        page_data = response.payload.get("data")
+        if not isinstance(page_data, list):
+            raise AdapterError(f"{operation} returned malformed relationship data")
+        for item in page_data:
+            if (
+                not isinstance(item, dict)
+                or item.get("type") != expected_type
+                or not isinstance(item.get("id"), str)
+                or _RESOURCE_ID.fullmatch(item["id"]) is None
+                or item["id"] in seen_ids
+            ):
+                raise AdapterError(f"{operation} returned malformed relationship data")
+            seen_ids.add(item["id"])
+            result.append(item)
+        links = response.payload.get("links")
+        if links is None:
+            return result
+        if not isinstance(links, dict):
+            raise AdapterError(f"{operation} pagination is malformed")
+        next_url = links.get("next")
+        if next_url is None:
+            return result
+        if not isinstance(next_url, str) or not next_url:
+            raise AdapterError(f"{operation} pagination is malformed")
+        url = next_url
+    raise AdapterError(f"{operation} pagination exceeded the page limit")
+
+
+@dataclass(frozen=True)
+class XcodeCloudSourceCoordinates:
+    workflow_id: str
+    repository_id: str
+    git_reference_id: str
+    git_reference_name: str
+    repository_owner: str
+    repository_name: str
+    http_clone_url: str | None
+    ssh_clone_url: str | None
+
+    def evidence(self) -> dict[str, object]:
+        return {
+            "workflow_id": self.workflow_id,
+            "repository_id": self.repository_id,
+            "git_reference_id": self.git_reference_id,
+            "git_reference_name": self.git_reference_name,
+            "repository_owner": self.repository_owner,
+            "repository_name": self.repository_name,
+            "http_clone_url": self.http_clone_url,
+            "ssh_clone_url": self.ssh_clone_url,
+            "read_only": True,
+        }
+
+
+class XcodeCloudSourceDiscovery:
+    """Resolve a workflow's exact immutable candidate reference without mutation."""
+
+    def __init__(self, transport: HttpTransport) -> None:
+        self.transport = transport
+
+    @staticmethod
+    def _headers(config: Mapping[str, object]) -> dict[str, str]:
+        return apple_headers(config)
+
+    @staticmethod
+    def _optional_url(attributes: dict[str, object], key: str) -> str | None:
+        value = attributes.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value or any(ch in value for ch in "\x00\r\n"):
+            raise AdapterError(f"Xcode Cloud repository {key} is malformed")
+        return value
+
+    def discover(
+        self,
+        *,
+        workflow_id: str,
+        source_sha: str,
+        config: Mapping[str, object],
+    ) -> XcodeCloudSourceCoordinates:
+        if _RESOURCE_ID.fullmatch(workflow_id) is None:
+            raise AdapterError("Xcode Cloud source discovery workflow_id is invalid")
+        if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+            raise AdapterError("Xcode Cloud source discovery requires a full source SHA")
+        configured_base = config.get("api_base", _APPLE_API)
+        if (
+            not isinstance(configured_base, str)
+            or configured_base.rstrip("/") != _APPLE_API
+        ):
+            raise AdapterError(
+                "Xcode Cloud source discovery only connects to the official Apple API"
+            )
+        headers = self._headers(config)
+        workflow = _resource_data(
+            self.transport.request(
+                "GET",
+                f"{_APPLE_API}/v1/ciWorkflows/{quote(workflow_id, safe='')}",
+                headers=headers,
+            ),
+            "Xcode Cloud workflow discovery",
+        )
+        if workflow.get("type") != "ciWorkflows" or workflow.get("id") != workflow_id:
+            raise AdapterError("Xcode Cloud workflow discovery returned a different identity")
+        repository_id = _relationship_id_or_related(
+            self.transport,
+            headers,
+            workflow,
+            parent_type="ciWorkflows",
+            parent_id=workflow_id,
+            relationship="repository",
+            expected_type="scmRepositories",
+            operation="Xcode Cloud workflow repository discovery",
+        )
+        repository = _resource_data(
+            self.transport.request(
+                "GET",
+                f"{_APPLE_API}/v1/scmRepositories/{quote(repository_id, safe='')}",
+                headers=headers,
+            ),
+            "Xcode Cloud repository discovery",
+        )
+        if repository.get("type") != "scmRepositories" or repository.get("id") != repository_id:
+            raise AdapterError("Xcode Cloud repository discovery returned a different identity")
+        attributes = repository.get("attributes")
+        if not isinstance(attributes, dict):
+            raise AdapterError("Xcode Cloud repository discovery returned malformed attributes")
+        owner = attributes.get("ownerName")
+        name = attributes.get("repositoryName")
+        if not isinstance(owner, str) or not owner or not isinstance(name, str) or not name:
+            raise AdapterError("Xcode Cloud repository identity is malformed")
+        expected_ref = f"refs/tags/shipyard-candidate-{source_sha}"
+        refs = _relationship_resources_or_related(
+            self.transport,
+            headers,
+            repository,
+            parent_type="scmRepositories",
+            parent_id=repository_id,
+            relationship="gitReferences",
+            expected_type="scmGitReferences",
+            operation="Xcode Cloud Git reference discovery",
+        )
+        matches: list[dict[str, object]] = []
+        seen_ids: set[str] = set()
+        for resource in refs:
+            reference_id = resource.get("id")
+            if not isinstance(reference_id, str) or _RESOURCE_ID.fullmatch(reference_id) is None:
+                raise AdapterError("Xcode Cloud Git reference identity is malformed")
+            if reference_id in seen_ids:
+                raise AdapterError(
+                    "Xcode Cloud Git reference discovery returned duplicate identity"
+                )
+            seen_ids.add(reference_id)
+            ref_attributes = resource.get("attributes")
+            if not isinstance(ref_attributes, dict):
+                raise AdapterError("Xcode Cloud Git reference attributes are malformed")
+            if ref_attributes.get("canonicalName") == expected_ref:
+                matches.append(resource)
+        if len(matches) != 1:
+            raise AdapterError(
+                "expected exactly one Xcode Cloud candidate reference for exact source SHA; "
+                f"found {len(matches)}"
+            )
+        selected = matches[0]
+        selected_attributes = selected.get("attributes")
+        assert isinstance(selected_attributes, dict)
+        if (
+            selected_attributes.get("isDeleted") is not False
+            or selected_attributes.get("kind") != "TAG"
+            or selected_attributes.get("canonicalName") != expected_ref
+        ):
+            raise AdapterError("Xcode Cloud candidate reference is deleted, not a tag, or changed")
+        selected_repository = _inline_relationship_id(
+            selected, "repository", "scmRepositories"
+        )
+        if selected_repository not in {None, repository_id}:
+            raise AdapterError("Xcode Cloud candidate reference belongs to a different repository")
+        selected_id = selected.get("id")
+        assert isinstance(selected_id, str)
+        return XcodeCloudSourceCoordinates(
+            workflow_id=workflow_id,
+            repository_id=repository_id,
+            git_reference_id=selected_id,
+            git_reference_name=expected_ref,
+            repository_owner=owner,
+            repository_name=name,
+            http_clone_url=self._optional_url(attributes, "httpCloneUrl"),
+            ssh_clone_url=self._optional_url(attributes, "sshCloneUrl"),
+        )
+
+
 @dataclass(frozen=True)
 class _XcodeCoordinates:
     workflow_id: str
@@ -194,13 +445,155 @@ class _XcodeCoordinates:
     git_reference_name: str
     source_remote: str
     repo_path: Path
-    token_env: str
     clean: bool
     base: str
 
     @property
     def identity(self) -> str:
         return f"{self.workflow_id}:{self.git_reference_id}"
+
+
+class XcodeCloudRunDiscovery:
+    """Read-only adoption of exactly one Xcode Cloud run for an approved source SHA."""
+
+    _MAX_PAGES = 20
+
+    def __init__(self, transport: HttpTransport) -> None:
+        self.transport = transport
+
+    @staticmethod
+    def _headers(context: AdapterContext) -> dict[str, str]:
+        return apple_headers(context.config)
+
+    @staticmethod
+    def _validate_page_url(url: str, workflow_id: str, seen: set[str]) -> None:
+        parsed = urlsplit(url)
+        expected_path = f"/v1/ciWorkflows/{quote(workflow_id, safe='')}/buildRuns"
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "api.appstoreconnect.apple.com"
+            or parsed.path != expected_path
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or url in seen
+        ):
+            raise AdapterError("Xcode Cloud discovery pagination URL is invalid")
+
+    @staticmethod
+    def _run_status(attributes: dict[str, object]) -> AdapterStatus:
+        progress = attributes.get("executionProgress")
+        completion = attributes.get("completionStatus")
+        if progress in {"PENDING", "RUNNING"}:
+            return "pending"
+        if progress == "COMPLETE" and completion == "SUCCEEDED":
+            return "succeeded"
+        if progress == "COMPLETE" and completion in _FAILURE_COMPLETIONS:
+            return "failed"
+        return "unknown"
+
+    def discover(self, context: AdapterContext) -> ProviderReadback:
+        if context.provider != "apple":
+            raise AdapterError("Xcode Cloud discovery requires provider apple")
+        if re.fullmatch(r"[0-9a-f]{40}", context.source_sha) is None:
+            raise AdapterError("Xcode Cloud discovery requires a full source SHA")
+        workflow_id = _config_string(context, "workflow_id")
+        if _RESOURCE_ID.fullmatch(workflow_id) is None:
+            raise AdapterError("Xcode Cloud discovery workflow_id is invalid")
+        configured_base = context.config.get("api_base", _APPLE_API)
+        if not isinstance(configured_base, str) or configured_base.rstrip("/") != _APPLE_API:
+            raise AdapterError("Xcode Cloud discovery only connects to the official Apple API")
+        headers = self._headers(context)
+        url = f"{_APPLE_API}/v1/ciWorkflows/{quote(workflow_id, safe='')}/buildRuns"
+        seen: set[str] = set()
+        matches: list[tuple[str, dict[str, object]]] = []
+        pages = 0
+        for _page in range(self._MAX_PAGES):
+            self._validate_page_url(url, workflow_id, seen)
+            seen.add(url)
+            pages += 1
+            response = self.transport.request("GET", url, headers=headers)
+            if not 200 <= response.status < 300:
+                raise AdapterError(
+                    f"Xcode Cloud run discovery failed with status {response.status}"
+                )
+            data = response.payload.get("data")
+            if not isinstance(data, list):
+                raise AdapterError("Xcode Cloud run discovery returned malformed data")
+            for resource in data:
+                if not isinstance(resource, dict) or resource.get("type") != "ciBuildRuns":
+                    raise AdapterError(
+                        "Xcode Cloud run discovery returned malformed run data"
+                    )
+                run_id = resource.get("id")
+                attributes = resource.get("attributes")
+                source = (
+                    attributes.get("sourceCommit")
+                    if isinstance(attributes, dict)
+                    else None
+                )
+                sha = source.get("commitSha") if isinstance(source, dict) else None
+                if not isinstance(run_id, str) or not isinstance(attributes, dict):
+                    raise AdapterError(
+                        "Xcode Cloud run discovery returned malformed run data"
+                    )
+                if sha == context.source_sha:
+                    matches.append((run_id, attributes))
+            links = response.payload.get("links")
+            if links is None:
+                break
+            if not isinstance(links, dict):
+                raise AdapterError(
+                    "Xcode Cloud run discovery returned malformed pagination"
+                )
+            next_url = links.get("next")
+            if next_url is None:
+                break
+            if not isinstance(next_url, str) or not next_url:
+                raise AdapterError(
+                    "Xcode Cloud run discovery returned malformed pagination"
+                )
+            url = next_url
+        else:
+            raise AdapterError("Xcode Cloud run discovery exceeded the page limit")
+        if not matches:
+            return ProviderReadback(
+                "unknown",
+                f"xcodecloud:{context.source_sha}",
+                context.source_sha,
+                {
+                    "workflow_id": workflow_id,
+                    "state": "absent",
+                    "pages": pages,
+                    "matches": 0,
+                    "adopted": False,
+                    "read_only": True,
+                },
+            )
+        if len(matches) != 1:
+            raise AdapterError(
+                "expected exactly one Xcode Cloud run for exact source SHA; "
+                f"found {len(matches)}"
+            )
+        run_id, attributes = matches[0]
+        number = attributes.get("number")
+        return ProviderReadback(
+            self._run_status(attributes),
+            run_id,
+            context.source_sha,
+            {
+                "workflow_id": workflow_id,
+                "build_number": (
+                    str(number) if isinstance(number, (str, int)) else None
+                ),
+                "execution_progress": attributes.get("executionProgress"),
+                "completion_status": attributes.get("completionStatus"),
+                "pages": pages,
+                "matches": 1,
+                "adopted": True,
+                "read_only": True,
+            },
+        )
 
 
 class XcodeCloudBuildAdapter:
@@ -270,9 +663,7 @@ class XcodeCloudBuildAdapter:
         for value in (workflow_id, git_reference_id):
             if _RESOURCE_ID.fullmatch(value) is None:
                 raise AdapterError("xcodecloud.build requires conservative provider identifiers")
-        token_env = _config_string(context, "token_env")
-        if _ENV_NAME.fullmatch(token_env) is None or not token_env.startswith("APPLE_"):
-            raise AdapterError("xcodecloud.build token_env must use an APPLE_ variable")
+        validate_apple_credential_references(context.config)
         clean = context.config.get("clean", True)
         if not isinstance(clean, bool):
             raise AdapterError("xcodecloud.build clean must be a boolean")
@@ -303,7 +694,6 @@ class XcodeCloudBuildAdapter:
             git_reference_name,
             source_remote,
             repo_path,
-            token_env,
             clean,
             _APPLE_API,
         )
@@ -312,21 +702,14 @@ class XcodeCloudBuildAdapter:
         return coordinates
 
     @staticmethod
-    def _headers(coordinates: _XcodeCoordinates) -> dict[str, str]:
-        token = os.environ.get(coordinates.token_env)
-        if not token:
-            raise AdapterError(
-                f"credential environment variable {coordinates.token_env} is not set"
-            )
-        if "\x00" in token or "\r" in token or "\n" in token:
-            raise AdapterError("Apple credential environment variable is malformed")
-        return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    def _headers(context: AdapterContext) -> dict[str, str]:
+        return apple_headers(context.config)
 
     def _identity(
         self, context: AdapterContext
     ) -> tuple[_XcodeCoordinates, dict[str, str], dict[str, object]]:
         coordinates = self._coordinates(context)
-        headers = self._headers(coordinates)
+        headers = self._headers(context)
         workflow = _resource_data(
             self.transport.request(
                 "GET",
@@ -372,6 +755,7 @@ class XcodeCloudBuildAdapter:
 
     def check(self, context: AdapterContext) -> ConnectionCheck:
         coordinates, _, _ = self._identity(context)
+        source_observation_digest = context.config.get("source_observation_digest")
         return ConnectionCheck(
             "verified",
             context.provider,
@@ -383,6 +767,7 @@ class XcodeCloudBuildAdapter:
                 "git_reference_name": coordinates.git_reference_name,
                 "source_remote": coordinates.source_remote,
                 "source_sha": context.source_sha,
+                "source_observation_digest": source_observation_digest,
             },
         )
 
@@ -428,6 +813,9 @@ class XcodeCloudBuildAdapter:
                 "workflow_id": coordinates.workflow_id,
                 "git_reference_id": coordinates.git_reference_id,
                 "http_status": created.status,
+                "source_observation_digest": context.config.get(
+                    "source_observation_digest"
+                ),
             },
         )
 
@@ -444,7 +832,7 @@ class XcodeCloudBuildAdapter:
             return ProviderReadback(
                 "failed", receipt.operation_id, None, {"identity_match": False}
             )
-        headers = self._headers(coordinates)
+        headers = self._headers(context)
         response = self.transport.request(
             "GET",
             f"{coordinates.base}/v1/ciBuildRuns/{quote(receipt.operation_id, safe='')}",
@@ -515,5 +903,8 @@ class XcodeCloudBuildAdapter:
                 "identity_source": identity_source,
                 "execution_progress": progress,
                 "completion_status": completion,
+                "source_observation_digest": context.config.get(
+                    "source_observation_digest"
+                ),
             },
         )

@@ -65,11 +65,14 @@ def test_json_errors_use_the_versioned_envelope(tmp_path, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     envelope = json.loads(captured.err)
-    assert envelope == {
-        "api_version": "shipyard.cli/v1",
-        "ok": False,
-        "error": {"message": "connection profile not found: missing"},
-    }
+    assert envelope["api_version"] == "shipyard.cli/v1"
+    assert envelope["ok"] is False
+    assert envelope["status"] == "invalid"
+    assert envelope["data"] is None
+    assert envelope["error"]["code"] == "INVALID_REQUEST"
+    assert envelope["error"]["message"] == "connection profile not found: missing"
+    assert envelope["error"]["retryable"] is False
+    assert envelope["error"]["mutation"] == "none"
 
 
 def test_doctor_reports_missing_credentials_without_reading_values(

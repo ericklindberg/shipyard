@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
+import shutil
 import subprocess
 import sys
+import tarfile
+import time
+import zipfile
+from io import BytesIO
 from pathlib import Path
+
+import pytest
 
 from shipyard import __version__
 
@@ -10,6 +18,15 @@ ROOT = Path(__file__).parents[1]
 SCANNER = ROOT / "scripts/scan_tracked_secrets.py"
 CHECKSUMS = ROOT / "scripts/write_checksums.py"
 RELEASE_ARTIFACTS = ROOT / "scripts/resolve_release_artifacts.py"
+RELEASE_BUILDER = ROOT / "scripts/build_release_artifacts.py"
+
+_SPEC = importlib.util.spec_from_file_location("shipyard_release_builder", RELEASE_BUILDER)
+assert _SPEC is not None and _SPEC.loader is not None
+_BUILDER = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_BUILDER)
+ReleaseBuildError = _BUILDER.ReleaseBuildError
+build_release_artifacts = _BUILDER.build
+normalize_sdist = _BUILDER.normalize_sdist
 
 
 def _git(path: Path, *args: str) -> None:
@@ -108,3 +125,142 @@ def test_release_artifact_resolver_rejects_ambiguous_build_outputs(tmp_path):
 
     assert result.returncode == 2
     assert "expected exactly one wheel" in result.stderr
+
+
+def _archive(path: Path, *, link: bool = False) -> None:
+    with tarfile.open(path, "w:gz") as archive:
+        root = tarfile.TarInfo("shipyard_release-0.6.0")
+        root.type = tarfile.DIRTYPE
+        root.mode = 0o755
+        root.mtime = int(time.time())
+        archive.addfile(root)
+        member = tarfile.TarInfo("shipyard_release-0.6.0/file.txt")
+        member.mtime = int(time.time())
+        if link:
+            member.type = tarfile.SYMTYPE
+            member.linkname = "../outside"
+            archive.addfile(member)
+        else:
+            payload = b"release"
+            member.size = len(payload)
+            member.mode = 0o644
+            archive.addfile(member, BytesIO(payload))
+
+
+def test_sdist_normalizer_is_deterministic_and_strips_dynamic_metadata(tmp_path):
+    source = tmp_path / "source.tar.gz"
+    _archive(source)
+    first = tmp_path / "first.tar.gz"
+    second = tmp_path / "second.tar.gz"
+
+    normalize_sdist(source, first, 1_700_000_000)
+    normalize_sdist(source, second, 1_700_000_000)
+
+    assert first.read_bytes() == second.read_bytes()
+    assert int.from_bytes(first.read_bytes()[4:8], "little") == 1_700_000_000
+    with tarfile.open(first, "r:gz") as archive:
+        assert {member.mtime for member in archive.getmembers()} == {1_700_000_000}
+        assert {member.uid for member in archive.getmembers()} == {0}
+        assert {member.gid for member in archive.getmembers()} == {0}
+
+
+def test_sdist_normalizer_rejects_archive_links(tmp_path):
+    source = tmp_path / "source.tar.gz"
+    _archive(source, link=True)
+
+    with pytest.raises(ReleaseBuildError, match="unsupported member type"):
+        normalize_sdist(source, tmp_path / "normalized.tar.gz", 1_700_000_000)
+
+
+def test_release_builder_produces_byte_identical_outputs_from_clean_commit(tmp_path):
+    source = tmp_path / "source"
+    subprocess.run(["git", "clone", "-q", str(ROOT), str(source)], check=True)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+
+    for destination in (first, second):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(RELEASE_BUILDER),
+                "--root",
+                str(source),
+                "--directory",
+                str(destination),
+            ],
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+    assert sorted(path.name for path in first.iterdir()) == sorted(
+        path.name for path in second.iterdir()
+    )
+    for artifact in first.iterdir():
+        assert artifact.read_bytes() == (second / artifact.name).read_bytes()
+
+
+def test_release_builder_rejects_dirty_source(tmp_path):
+    source = tmp_path / "source"
+    subprocess.run(["git", "clone", "-q", str(ROOT), str(source)], check=True)
+    (source / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(RELEASE_BUILDER), "--root", str(source)],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "worktree must be clean" in result.stderr
+
+
+def test_release_builder_rolls_back_every_output_when_normalization_fails(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    subprocess.run(["git", "clone", "-q", str(ROOT), str(source)], check=True)
+    destination = tmp_path / "dist"
+
+    def fail_normalization(*_args, **_kwargs):
+        raise ReleaseBuildError("injected normalization failure")
+
+    monkeypatch.setattr(_BUILDER, "normalize_sdist", fail_normalization)
+    with pytest.raises(ReleaseBuildError, match="injected normalization failure"):
+        build_release_artifacts(source, destination)
+
+    assert destination.is_dir()
+    assert list(destination.iterdir()) == []
+
+
+def test_release_builder_embeds_exact_source_identity_and_cleans_worktree(tmp_path) -> None:
+    repo = tmp_path / "repository"
+    shutil.copytree(ROOT, repo, ignore=shutil.ignore_patterns(".git", ".venv", "dist"))
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, check=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    destination = tmp_path / "dist"
+
+    result = build_release_artifacts(repo, destination)
+
+    assert result["source_sha"] == sha
+    assert not (repo / "src" / "shipyard" / "_build_source.py").exists()
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
+    wheel = next(destination.glob("*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        marker = archive.read("shipyard/_build_source.py").decode("utf-8")
+    assert f'SOURCE_SHA = "{sha}"' in marker

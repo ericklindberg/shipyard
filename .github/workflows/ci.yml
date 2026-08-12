@@ -37,7 +37,20 @@ jobs:
       - run: uv run ruff check src tests scripts
       - run: uv run ty check src scripts
       - run: uv run bandit -q -r src scripts -ll -s B404,B603,B607
-      - run: uv build
+      - run: python scripts/build_release_artifacts.py --directory dist
+      - name: Resolve exact release artifact names
+        run: python scripts/resolve_release_artifacts.py --directory dist >> "$GITHUB_ENV"
+      - name: Install and smoke-test the canonical wheel
+        run: |
+          uv export --no-emit-project --locked --output-file dist/runtime-requirements.txt
+          uv venv .installed-smoke
+          uv pip install --python .installed-smoke/bin/python --require-hashes -r dist/runtime-requirements.txt
+          uv pip install --python .installed-smoke/bin/python --no-deps "dist/$SHIPYARD_WHEEL"
+          .installed-smoke/bin/python scripts/smoke_installed_release.py \
+            --shipyard .installed-smoke/bin/shipyard \
+            --expected-version "$SHIPYARD_VERSION" \
+            --expected-source-sha "${{ github.sha }}"
+          rm -rf .installed-smoke dist/runtime-requirements.txt
       - run: git diff --check
       - run: git diff --exit-code
 
@@ -58,15 +71,17 @@ jobs:
           trap 'rm -f "$requirements"' EXIT
           uv export --extra dev --no-emit-project --locked --output-file "$requirements"
           uv run pip-audit --requirement "$requirements" --require-hashes --disable-pip --strict --progress-spinner off
-      - run: uv build
+      - run: python scripts/build_release_artifacts.py --directory dist
       - name: Resolve exact release artifact names
         run: python scripts/resolve_release_artifacts.py --directory dist >> "$GITHUB_ENV"
       - name: Generate reproducible runtime CycloneDX SBOM
         run: |
+          uv export --no-emit-project --locked --output-file dist/runtime-requirements.txt
           uv venv .runtime-sbom
+          uv pip install --python .runtime-sbom/bin/python --require-hashes -r dist/runtime-requirements.txt
           uv pip install --python .runtime-sbom/bin/python --no-deps "dist/$SHIPYARD_WHEEL"
           uv run cyclonedx-py environment .runtime-sbom/bin/python --pyproject pyproject.toml --mc-type application --sv 1.6 --output-reproducible --output-format JSON --output-file "dist/$SHIPYARD_RUNTIME_SBOM"
-          rm -rf .runtime-sbom
+          rm -rf .runtime-sbom dist/runtime-requirements.txt
       - name: Generate reproducible build-environment CycloneDX SBOM
         run: uv run cyclonedx-py environment .venv --pyproject pyproject.toml --mc-type application --sv 1.6 --output-reproducible --output-format JSON --output-file "dist/$SHIPYARD_BUILD_SBOM"
       - name: Generate checksums

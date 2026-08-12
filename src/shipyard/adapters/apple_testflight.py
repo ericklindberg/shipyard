@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from urllib.parse import quote, urlsplit
 
+from ..apple_auth import apple_headers, validate_apple_credential_references
+from ..gates import (
+    GateError,
+    close_gate_evidence,
+    load_gate_attestation,
+    open_verified_gate_evidence,
+)
 from .apple import (
     _APPLE_API,
-    _ENV_NAME,
     _RESOURCE_ID,
     _config_string,
     _relationship_id_or_related,
@@ -28,7 +33,7 @@ class _Coordinates:
     bundle_id: str
     marketing_version: str
     build_number: str
-    token_env: str
+    beta_group_internal: bool = True
 
     @property
     def identity(self) -> str:
@@ -74,22 +79,21 @@ class TestFlightGroupAdapter:
             for value in (marketing_version, build_number)
         ):
             raise AdapterError("App Store Connect version identities are invalid")
-        token_env = _config_string(context, "token_env")
-        if _ENV_NAME.fullmatch(token_env) is None or not token_env.startswith("APPLE_"):
-            raise AdapterError(
-                "appstoreconnect.testflight token_env must use an APPLE_ variable"
-            )
+        validate_apple_credential_references(context.config)
         configured_base = context.config.get("api_base", _APPLE_API)
         if not isinstance(configured_base, str) or configured_base.rstrip("/") != _APPLE_API:
             raise AdapterError(
                 "appstoreconnect.testflight only connects to the official Apple API"
             )
         coordinates = _Coordinates(
-            **identifiers,
+            app_id=identifiers["app_id"],
+            build_id=identifiers["build_id"],
+            beta_group_id=identifiers["beta_group_id"],
+            pre_release_version_id=identifiers["pre_release_version_id"],
+            xcode_cloud_run_id=identifiers["xcode_cloud_run_id"],
             bundle_id=bundle_id,
             marketing_version=marketing_version,
             build_number=build_number,
-            token_env=token_env,
         )
         if context.destination != coordinates.identity:
             raise AdapterError(
@@ -97,16 +101,6 @@ class TestFlightGroupAdapter:
             )
         return coordinates
 
-    @staticmethod
-    def _headers(coordinates: _Coordinates) -> dict[str, str]:
-        token = os.environ.get(coordinates.token_env)
-        if not token:
-            raise AdapterError(
-                f"credential environment variable {coordinates.token_env} is not set"
-            )
-        if "\x00" in token or "\r" in token or "\n" in token:
-            raise AdapterError("Apple credential environment variable is malformed")
-        return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
     def _get(
         self,
@@ -130,7 +124,7 @@ class TestFlightGroupAdapter:
 
     def _identity(self, context: AdapterContext) -> tuple[_Coordinates, dict[str, str]]:
         coordinates = self._coordinates(context)
-        headers = self._headers(coordinates)
+        headers = apple_headers(context.config)
         app = self._get(coordinates, headers, "apps", coordinates.app_id, "Apple app verification")
         app_attributes = app.get("attributes")
         if (
@@ -239,9 +233,14 @@ class TestFlightGroupAdapter:
             coordinates.beta_group_id,
             "TestFlight beta group verification",
         )
-        if group.get("type") != "betaGroups":
+        group_attributes = group.get("attributes")
+        if (
+            group.get("type") != "betaGroups"
+            or not isinstance(group_attributes, dict)
+            or not isinstance(group_attributes.get("isInternalGroup"), bool)
+        ):
             raise AdapterError(
-                "TestFlight beta group does not belong to the configured app"
+                "TestFlight beta group internal/external identity is malformed"
             )
         group_app_id = _relationship_id_or_related(
             self.transport,
@@ -257,7 +256,60 @@ class TestFlightGroupAdapter:
             raise AdapterError(
                 "TestFlight beta group does not belong to the configured app"
             )
-        return coordinates, headers
+        return (
+            _Coordinates(
+                coordinates.app_id,
+                coordinates.build_id,
+                coordinates.beta_group_id,
+                coordinates.pre_release_version_id,
+                coordinates.xcode_cloud_run_id,
+                coordinates.bundle_id,
+                coordinates.marketing_version,
+                coordinates.build_number,
+                group_attributes["isInternalGroup"],
+            ),
+            headers,
+        )
+
+    @staticmethod
+    def _verify_external_gate(
+        context: AdapterContext, coordinates: _Coordinates
+    ) -> tuple[int, ...]:
+        if coordinates.beta_group_internal:
+            return ()
+        gate_path = context.config.get("physical_device_attestation")
+        project_digest = context.config.get("release_project_digest")
+        apple_observation_digest = context.config.get("apple_observation_digest")
+        if (
+            not isinstance(gate_path, str)
+            or not gate_path
+            or not isinstance(project_digest, str)
+            or not project_digest
+            or not isinstance(apple_observation_digest, str)
+            or not apple_observation_digest
+        ):
+            raise AdapterError(
+                "external TestFlight requires a physical-device attestation and release identity"
+            )
+        try:
+            gate = load_gate_attestation(gate_path)
+            descriptors = open_verified_gate_evidence(gate)
+        except GateError as exc:
+            raise AdapterError(f"external TestFlight gate verification failed: {exc}") from exc
+        if (
+            gate.gate != "physical-device"
+            or gate.status != "passed"
+            or gate.source_sha != context.source_sha
+            or gate.project_digest != project_digest
+            or gate.apple_observation_digest != apple_observation_digest
+            or gate.app_version != coordinates.marketing_version
+            or gate.build_number != coordinates.build_number
+        ):
+            close_gate_evidence(descriptors)
+            raise AdapterError(
+                "external TestFlight physical-device attestation does not match the release"
+            )
+        return descriptors
 
     def check(self, context: AdapterContext) -> ConnectionCheck:
         coordinates, _ = self._identity(context)
@@ -275,18 +327,23 @@ class TestFlightGroupAdapter:
                 "build_number": coordinates.build_number,
                 "xcode_cloud_run_id": coordinates.xcode_cloud_run_id,
                 "source_sha": context.source_sha,
+                "beta_group_internal": coordinates.beta_group_internal,
             },
         )
 
     def execute(self, context: AdapterContext) -> MutationReceipt:
         coordinates, headers = self._identity(context)
-        response = self.transport.request(
-            "POST",
-            f"{_APPLE_API}/v1/betaGroups/{quote(coordinates.beta_group_id, safe='')}"
-            "/relationships/builds",
-            headers=headers,
-            body={"data": [{"type": "builds", "id": coordinates.build_id}]},
-        )
+        gate_descriptors = self._verify_external_gate(context, coordinates)
+        try:
+            response = self.transport.request(
+                "POST",
+                f"{_APPLE_API}/v1/betaGroups/{quote(coordinates.beta_group_id, safe='')}"
+                "/relationships/builds",
+                headers=headers,
+                body={"data": [{"type": "builds", "id": coordinates.build_id}]},
+            )
+        finally:
+            close_gate_evidence(gate_descriptors)
         if response.status != 204:
             raise AdapterError(f"TestFlight build attachment failed with status {response.status}")
         return MutationReceipt(

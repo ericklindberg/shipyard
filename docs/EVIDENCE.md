@@ -56,3 +56,9 @@ The offline verifier proves bundle self-consistency, exact artifact hashes, and 
 For third-party distribution, pair the bundle with an authenticated transport, detached signature, Sigstore/SLSA attestation, or provider release provenance. Verify that external proof separately before treating the bundle as authentic.
 
 Bundles can contain release binaries and exact operational metadata. Inspect their contents and use an appropriate secure sharing channel before distributing them.
+
+## Aggregate release dossiers
+
+`shipyard release dossier export` creates a `shipyard.release-dossier/v1` archive spanning multiple governed run bundles, immutable GET-only provider observations, exact-SHA gate attestations, gate proof bytes, and declared native/CI artifacts. `shipyard release dossier verify` is offline and re-verifies every child run plus the dossier's complete policy/member manifest.
+
+External and production scopes fail closed when any project-required gate is missing or not passed. The verifier rejects cross-SHA/project substitutions, changed child bundles, changed observation/gate/artifact bytes, missing gate proof, links, traversal, duplicates, undeclared members, and malformed verdict policy. Like a child bundle, a dossier proves self-consistency—not authorship—unless paired with separately verified signature/provenance.

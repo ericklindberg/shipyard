@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 from collections.abc import Iterable
 
 import pytest
 
+import shipyard.adapters.apple_testflight as testflight_module
 from shipyard.adapters.apple import XcodeCloudBuildAdapter
 from shipyard.adapters.apple_testflight import (
     TestFlightGroupAdapter as AppleTestFlightGroupAdapter,
 )
 from shipyard.adapters.base import AdapterContext, AdapterError, MutationReceipt
 from shipyard.adapters.http import HttpResponse
+from shipyard.gates import GateAttestation
 
 
 class FakeTransport:
@@ -443,6 +447,7 @@ def _testflight_identity_responses():
                 "data": {
                     "type": "betaGroups",
                     "id": "group-1",
+                    "attributes": {"name": "Testing", "isInternalGroup": True},
                     "relationships": {
                         "app": {"data": {"type": "apps", "id": "app-1"}}
                     },
@@ -590,6 +595,154 @@ def test_testflight_execute_revalidates_then_adds_exact_build_relationship(monke
         },
         "body": {"data": [{"type": "builds", "id": "build-1"}]},
     }
+
+
+def test_testflight_external_group_refuses_missing_physical_device_gate_before_post(
+    monkeypatch,
+):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    responses = _testflight_identity_responses()
+    group = responses[4].payload["data"]
+    assert isinstance(group, dict)
+    attributes = group["attributes"]
+    assert isinstance(attributes, dict)
+    attributes.update({"name": "External Testing", "isInternalGroup": False})
+    transport = FakeTransport(responses)
+
+    with pytest.raises(AdapterError, match="physical-device attestation"):
+        AppleTestFlightGroupAdapter(transport).execute(_testflight_context())
+
+    assert all(call["method"] != "POST" for call in transport.calls)
+
+
+def test_testflight_external_group_accepts_matching_physical_device_gate(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    responses = _testflight_identity_responses()
+    group = responses[4].payload["data"]
+    assert isinstance(group, dict)
+    attributes = group["attributes"]
+    assert isinstance(attributes, dict)
+    attributes.update({"name": "External Testing", "isInternalGroup": False})
+    device_evidence = tmp_path / "device.txt"
+    device_evidence.write_text("physical iPhone build 42 passed", encoding="utf-8")
+    observation_digest = "b" * 64
+    project_digest = "c" * 64
+    gate = GateAttestation.create(
+        gate="physical-device",
+        project_digest=project_digest,
+        source_sha="a" * 40,
+        status="passed",
+        actor="operator",
+        reason="verified physical iPhone",
+        apple_observation_digest=observation_digest,
+        app_version="2.1",
+        build_number="42",
+        device="iPhone",
+        os_version="iOS 26",
+        checks=("launch", "first-capture"),
+        evidence_paths=(device_evidence,),
+        observed_at="2026-08-12T12:00:00Z",
+    )
+    gate_path = tmp_path / "physical-device.json"
+    gate_path.write_text(json.dumps(gate.payload()), encoding="utf-8")
+    gate_path.chmod(0o600)
+    context = _testflight_context()
+    context.config.update(
+        {
+            "physical_device_attestation": str(gate_path),
+            "release_project_digest": project_digest,
+            "apple_observation_digest": observation_digest,
+        }
+    )
+    transport = FakeTransport([*responses, HttpResponse(204, {})])
+
+    receipt = AppleTestFlightGroupAdapter(transport).execute(context)
+
+    assert receipt.operation_id == "group-1:build-1"
+    assert transport.calls[-1]["method"] == "POST"
+
+
+@pytest.mark.parametrize("post_failure", [False, True])
+def test_testflight_external_gate_evidence_descriptor_spans_post(
+    monkeypatch, tmp_path, post_failure
+):
+    monkeypatch.setenv("APPLE_ASC_TOKEN", "secret-token")
+    responses = _testflight_identity_responses()
+    group = responses[4].payload["data"]
+    assert isinstance(group, dict)
+    attributes = group["attributes"]
+    assert isinstance(attributes, dict)
+    attributes.update({"name": "External Testing", "isInternalGroup": False})
+    evidence = tmp_path / "device.txt"
+    evidence.write_text("physical iPhone build 42 passed", encoding="utf-8")
+    observation_digest = "b" * 64
+    project_digest = "c" * 64
+    gate = GateAttestation.create(
+        gate="physical-device",
+        project_digest=project_digest,
+        source_sha="a" * 40,
+        status="passed",
+        actor="operator",
+        reason="verified physical iPhone",
+        apple_observation_digest=observation_digest,
+        app_version="2.1",
+        build_number="42",
+        device="iPhone",
+        os_version="iOS 26",
+        checks=("launch",),
+        evidence_paths=(evidence,),
+        observed_at="2026-08-12T12:00:00Z",
+    )
+    gate_path = tmp_path / "physical-device.json"
+    gate_path.write_text(json.dumps(gate.payload()), encoding="utf-8")
+    gate_path.chmod(0o600)
+    context = _testflight_context()
+    context.config.update(
+        {
+            "physical_device_attestation": str(gate_path),
+            "release_project_digest": project_digest,
+            "apple_observation_digest": observation_digest,
+        }
+    )
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open = testflight_module.open_verified_gate_evidence
+    real_close = testflight_module.close_gate_evidence
+
+    def tracking_open(attestation):
+        descriptors = real_open(attestation)
+        opened.extend(descriptors)
+        return descriptors
+
+    def tracking_close(descriptors):
+        values = tuple(descriptors)
+        closed.extend(values)
+        real_close(values)
+
+    class PostInspectingTransport(FakeTransport):
+        def request(self, method, url, *, headers, body=None):
+            if method == "POST":
+                assert opened
+                os.fstat(opened[0])
+                if post_failure:
+                    raise RuntimeError("provider unavailable")
+            return super().request(method, url, headers=headers, body=body)
+
+    monkeypatch.setattr(testflight_module, "open_verified_gate_evidence", tracking_open)
+    monkeypatch.setattr(testflight_module, "close_gate_evidence", tracking_close)
+    transport = PostInspectingTransport([*responses, HttpResponse(204, {})])
+
+    if post_failure:
+        with pytest.raises(RuntimeError, match="provider unavailable"):
+            AppleTestFlightGroupAdapter(transport).execute(context)
+    else:
+        AppleTestFlightGroupAdapter(transport).execute(context)
+
+    assert opened and closed == opened
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
 
 
 def test_testflight_refuses_beta_group_from_different_app_before_post(monkeypatch):

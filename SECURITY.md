@@ -55,11 +55,14 @@ Shipyard protects an operator from accidental, stale, ambiguous, or insufficient
 - HTTP checks use only official provider HTTPS origins, ignore ambient proxy variables, and do not follow redirects.
 - HTTP credential references must use the provider's prefix to prevent cross-provider ambient-secret confusion.
 - Store only environment-variable names in connection profiles and playbooks.
+- Native App Store Connect signing accepts only a short-lived token reference or issuer/key/private-key-path environment references. The key must be a user-owned regular mode-`0400`/`0600` P-256 key; JWTs are bounded and generated in memory.
 - Never place secret values in argv, destinations, remote URLs, playbooks, or approval reasons.
 - Shipyard never serializes its process environment.
 - Provider responses persisted by adapters must contain allowlisted evidence only, not raw response bodies or headers.
 
 Portable evidence bundles are written mode `0600`, reject links/traversal/duplicates, and include only approved artifacts. Their SHA-256 hashes and local audit chain prove self-consistency, not authorship: they are not signatures or an external trust root. Use authenticated transport or separately verified provenance before trusting a third-party bundle, and inspect metadata before sharing one.
+
+External TestFlight group mutation additionally requires a passed exact-SHA physical-device attestation bound to the same release project, Apple observation, app version, build number, and immutable evidence bytes. The adapter revalidates that gate immediately before POST; CLI playbook generation is not the sole enforcement boundary.
 
 ## Safe incident response
 

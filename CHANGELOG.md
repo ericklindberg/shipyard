@@ -4,6 +4,56 @@ All notable changes to Shipyard will be documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-12
+
+### Added
+
+- Added stable release-project manifests, immutable provider observations, bounded
+  read-only release waiting, and observation-bound playbook generation for GitHub,
+  Buzz, Xcode Cloud, and TestFlight release phases.
+- Added exact-SHA adoption of provider-created GitHub Actions and Xcode Cloud runs,
+  including Apple watched-repository/SCM-reference discovery, local filtering of
+  paginated build runs, and explicit absent, pending, failed, and succeeded states.
+- Added native App Store Connect ES256 token generation from user-scoped environment
+  references without storing private-key or token values.
+- Added physical-device gate attestations and aggregate `shipyard.release-dossier/v1`
+  export/verification across governed runs, provider observations, gate proof, and
+  declared release artifacts.
+- Added coherent `release project`, `release observation`, `release gate`, and
+  `release dossier` CLI namespaces plus canonical installed-wheel smoke coverage on
+  Linux and macOS.
+- Added a clean-exact-SHA reproducible artifact builder that derives
+  `SOURCE_DATE_EPOCH`, normalizes source-archive tar/gzip metadata, and makes both the
+  canonical wheel and source archive byte-identical across independent builds.
+- Embedded the canonical build source SHA in installed wheel runtime identity and
+  required Linux/macOS smoke gates to match it to the approved candidate.
+
+### Changed
+
+- Playbook loading now rejects unsupported provider/action/options before creating a
+  run, including annotated candidate tags on Buzz while preserving its compatible
+  provider alias.
+- The JSON CLI envelope exposes stable top-level status and structured error code,
+  phase, retryability, and mutation fields without removing the v1 `data` shape.
+- Runtime SBOMs inventory the complete hash-locked installed dependency closure,
+  including `cryptography`, instead of a dependency-free wheel environment.
+
+### Security
+
+- Portable dossier verification reparses the mandatory hash-bound release project and
+  recomputes scope-required gates, preventing a rebuilt dossier from omitting policy.
+- External TestFlight retains no-follow evidence descriptors across the provider POST,
+  closing the local path-swap window between gate verification and mutation.
+- External TestFlight groups require a passed exact-SHA physical-device attestation
+  bound to the same release project, Apple observation, app version, build number,
+  and immutable evidence bytes; hand-written playbooks cannot bypass this adapter gate.
+- Apple discovery/reconciliation is GET-only, official-origin-only, bounded, and
+  relationship-validated. Generated mutation playbooks contain only identities proved
+  by the verified observation and never credential values.
+- Aggregate dossiers reject symlinks, traversal, duplicate or undeclared members,
+  cross-SHA substitutions, missing gate proof, changed artifacts, and invalid child
+  run evidence during offline verification.
+
 ## [0.5.2] - 2026-08-11
 
 ### Added

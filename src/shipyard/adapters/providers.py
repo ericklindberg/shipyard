@@ -526,6 +526,181 @@ class _HttpAdapter:
             raise AdapterError(f"{operation} failed with status {response.status}")
 
 
+class GitHubWorkflowRunDiscovery(_HttpAdapter):
+    """Read-only adoption of required GitHub Actions runs for one exact SHA."""
+
+    credential_prefix = "GITHUB_"
+    action = "github.workflow.adopt"
+    _MAX_PAGES = 20
+
+    def _headers(self, context: AdapterContext) -> dict[str, str]:
+        return {
+            **super()._headers(context),
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2026-03-10",
+        }
+
+    @staticmethod
+    def _required_workflows(context: AdapterContext) -> tuple[str, ...]:
+        raw = _config_string(context, "required_workflow_ids")
+        values = tuple(part.strip() for part in raw.split(",") if part.strip())
+        if (
+            not values
+            or any(not value.isdecimal() for value in values)
+            or len(set(values)) != len(values)
+        ):
+            raise AdapterError("GitHub run discovery requires unique numeric workflow ids")
+        return values
+
+    def discover(self, context: AdapterContext) -> ProviderReadback:
+        if context.provider != "github-actions" or not _EXACT_SHA.fullmatch(
+            context.source_sha
+        ):
+            raise AdapterError(
+                "GitHub run discovery requires github-actions and a full source SHA"
+            )
+        owner = _config_string(context, "owner")
+        repo = _config_string(context, "repo")
+        repository_id = _config_string(context, "repository_id")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(
+            r"[A-Za-z0-9_.-]+", repo
+        ):
+            raise AdapterError("GitHub run discovery repository is invalid")
+        if not repository_id.isdecimal():
+            raise AdapterError("GitHub run discovery repository_id must be numeric")
+        required = self._required_workflows(context)
+        base = self._base(context, "https://api.github.com")
+        path = f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/actions/runs"
+        headers = self._headers(context)
+        repository = self.transport.request(
+            "GET",
+            f"{base}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}",
+            headers=headers,
+        )
+        self._require_success(repository, "GitHub repository verification")
+        expected_name = f"{owner}/{repo}"
+        full_name = repository.payload.get("full_name")
+        if (
+            str(repository.payload.get("id")) != repository_id
+            or not isinstance(full_name, str)
+            or full_name.casefold() != expected_name.casefold()
+        ):
+            raise AdapterError(
+                "GitHub run discovery repository identity does not match configuration"
+            )
+        matches: dict[str, list[dict[str, object]]] = {
+            workflow_id: [] for workflow_id in required
+        }
+        pages = 0
+        for page in range(1, self._MAX_PAGES + 1):
+            url = (
+                f"{base}{path}?head_sha={quote(context.source_sha, safe='')}"
+                f"&per_page=100&page={page}"
+            )
+            response = self.transport.request("GET", url, headers=headers)
+            self._require_success(response, "GitHub workflow run discovery")
+            runs = response.payload.get("workflow_runs")
+            if not isinstance(runs, list):
+                raise AdapterError(
+                    "GitHub workflow run discovery returned malformed data"
+                )
+            pages += 1
+            for run in runs:
+                if not isinstance(run, dict):
+                    raise AdapterError(
+                        "GitHub workflow run discovery returned malformed run data"
+                    )
+                workflow_id = str(run.get("workflow_id"))
+                if run.get("head_sha") == context.source_sha and workflow_id in matches:
+                    matches[workflow_id].append(run)
+            if len(runs) < 100:
+                break
+        else:
+            raise AdapterError("GitHub workflow run discovery exceeded the page limit")
+        selected: list[dict[str, object]] = []
+        missing: list[str] = []
+        for workflow_id in required:
+            candidates = matches[workflow_id]
+            if not candidates:
+                missing.append(workflow_id)
+                continue
+            if len(candidates) != 1:
+                raise AdapterError(
+                    "expected exactly one GitHub run for workflow "
+                    f"{workflow_id} and exact source SHA; found {len(candidates)}"
+                )
+            run = candidates[0]
+            run_id = run.get("id")
+            if not isinstance(run_id, int):
+                raise AdapterError(
+                    "GitHub workflow run discovery returned malformed run id"
+                )
+            selected.append(
+                {
+                    "id": run_id,
+                    "workflow_id": int(workflow_id),
+                    "name": run.get("name"),
+                    "status": run.get("status"),
+                    "conclusion": run.get("conclusion"),
+                    "event": run.get("event"),
+                    "run_attempt": run.get("run_attempt"),
+                    "html_url": run.get("html_url"),
+                }
+            )
+        def selected_run_id(run: dict[str, object]) -> int:
+            value = run.get("id")
+            if not isinstance(value, int):
+                raise AdapterError(
+                    "GitHub workflow run discovery returned malformed run id"
+                )
+            return value
+
+        selected.sort(key=selected_run_id)
+        failed = sum(
+            run["status"] == "completed" and run["conclusion"] != "success"
+            for run in selected
+        )
+        succeeded = sum(
+            run["status"] == "completed" and run["conclusion"] == "success"
+            for run in selected
+        )
+        pending = len(selected) - failed - succeeded
+        status: AdapterStatus = (
+            "failed"
+            if failed
+            else "unknown"
+            if missing
+            else "pending"
+            if pending
+            else "succeeded"
+        )
+        return ProviderReadback(
+            status,
+            f"github-checks:{context.source_sha}",
+            context.source_sha,
+            {
+                "repository": f"{owner}/{repo}",
+                "repository_id": repository_id,
+                "required": len(required),
+                "succeeded": succeeded,
+                "failed": failed,
+                "pending": pending,
+                "missing_workflow_ids": missing,
+                "state": (
+                    "absent"
+                    if len(missing) == len(required)
+                    else "partial"
+                    if missing
+                    else "present"
+                ),
+                "pages": pages,
+                "runs": selected,
+                "adopted": not missing,
+                "read_only": True,
+            },
+        )
+
+
 class GitHubWorkflowAdapter(_HttpAdapter):
     action = "github.workflow"
     credential_prefix = "GITHUB_"

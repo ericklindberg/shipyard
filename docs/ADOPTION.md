@@ -4,7 +4,7 @@ Shipyard is a local release gate. It binds one exact Git source candidate to exp
 
 ## Trust status
 
-The credential-free local path is exercised end to end. Git and GitHub Actions are release-dogfooded. Apple, OCI registry, and Kubernetes adapters have deterministic contract tests but **No live provider validation** is included in this repository yet. Treat those adapters as beta until a disposable provider sandbox produces reviewed receipts and readback evidence.
+The credential-free local path is exercised end to end. Git, GitHub Actions, GitHub/Buzz forge promotion, and the Apple internal-canary path are release-dogfooded. The Meridian acceptance run retained exact-SHA Xcode Cloud build and internal TestFlight mutation/readback evidence. Physical-device behavior, external TestFlight, App Store submission, OCI, and Kubernetes still have **No live provider validation** claim here; treat those boundaries as unavailable until their own reviewed evidence exists.
 
 Shipyard never automatically retries a provider mutation. A transport failure after dispatch becomes uncertain and requires read-only reconciliation.
 
@@ -93,7 +93,15 @@ The OpenSSH allowed-signers principal must equal `--actor`. Shipyard opens key a
 
 Shipyard does not yet authenticate a separate candidate-preparer principal. Do not claim cryptographic preparer/approver separation until a signed preparation or workload-identity contract is implemented.
 
-## Apple beta adapters
+## Apple governed internal-canary path
+
+Start from the stable release-project workflow in [Standalone release lifecycle](STANDALONE_RELEASE.md). Shipyard 0.6.0 discovers the watched SCM repository and exact candidate ref, adopts automatic exact-SHA Xcode Cloud runs, resolves app/build/version/group identities, and renders observation-bound mutation playbooks without copied opaque Apple IDs.
+
+```bash
+shipyard release project init .shipyard/release.toml --json
+shipyard release inspect . --project .shipyard/release.toml --allow-network --json
+shipyard release dossier verify /private/evidence/release-dossier.tar --json
+```
 
 ### Xcode Cloud
 
@@ -143,7 +151,7 @@ The run receipt stores the Apple build-run ID. Readback requires Apple `sourceCo
 
 `appstoreconnect.testflight` binds the exact app, bundle ID, build, marketing version, build number, Xcode Cloud run, source SHA, and beta group. Apple may omit inline relationship data from live resources; Shipyard resolves those identities through canonical official related-resource endpoints and bounded Apple-hosted pagination before mutation. It performs one build/group relationship mutation and drains only bounded Apple-hosted relationship pagination before declaring adoption.
 
-Keep Xcode Cloud and TestFlight as separately approved runs when they have different destination locks. Do not use the adapters with production credentials until disposable live validation confirms current App Store Connect resource semantics.
+Keep Xcode Cloud and TestFlight as separately approved runs when they have different destination locks. Internal-canary operation has one retained live acceptance case; repeatable disposable validation remains desirable. External TestFlight is adapter-blocked without an exact-SHA physical-device attestation, and App Store submission is not implemented by this path.
 
 ## OCI registry beta adapter
 

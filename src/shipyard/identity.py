@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import importlib.metadata
 import json
 import platform
@@ -12,6 +13,7 @@ from . import __version__
 from .runtime import resolve_executable, sanitized_environment
 
 _DISTRIBUTION = "shipyard-release"
+_SOURCE_SHA_LENGTH = 40
 
 
 def package_version() -> str:
@@ -41,6 +43,23 @@ def distribution_fingerprint() -> str:
 
 
 def source_sha() -> str | None:
+    try:
+        embedded = importlib.import_module("shipyard._build_source")
+    except ModuleNotFoundError:
+        embedded = None
+    if embedded is not None:
+        value = getattr(embedded, "SOURCE_SHA", None)
+        epoch = getattr(embedded, "SOURCE_DATE_EPOCH", None)
+        if (
+            isinstance(value, str)
+            and len(value) == _SOURCE_SHA_LENGTH
+            and all(character in "0123456789abcdef" for character in value)
+            and isinstance(epoch, int)
+            and not isinstance(epoch, bool)
+            and epoch > 0
+        ):
+            return value
+        return None
     root = Path(__file__).resolve().parents[2]
     if not (root / ".git").exists():
         return None
@@ -58,7 +77,7 @@ def source_sha() -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     value = completed.stdout.strip()
-    return value if len(value) == 40 else None
+    return value if len(value) == _SOURCE_SHA_LENGTH else None
 
 
 def runtime_identity() -> dict[str, object]:

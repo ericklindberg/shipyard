@@ -21,9 +21,10 @@ This roadmap describes direction, not a promise of dates. Provider support remai
 
 ## Mobile release adoption
 
-- Exact-source Xcode Cloud build identity and readback.
-- **Apple release adoption** across Xcode Cloud, App Store Connect processing, and explicit TestFlight group attachment.
-- Evidence linking source SHA, immutable build/run identifiers, bundle ID, marketing version, build number, signing/artifact identity, and observed distribution state.
+- **Apple release adoption** remains an explicit product pillar rather than an ambient
+  automation path.
+- Completed in 0.6.0: exact-source Xcode Cloud run discovery/adoption, App Store Connect processing/build/group identity resolution, explicit internal TestFlight attachment, physical-device gate enforcement, and aggregate release dossiers.
+- Next: repeatable disposable Apple sandbox validation across additional workflows, beta notes/localization, and explicit external/App Store promotion contracts after physical-device proof.
 - EAS Build and EAS Update adoption after the Apple contract is stable.
 
 ## Digest-native infrastructure

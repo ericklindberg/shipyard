@@ -5,7 +5,10 @@ Shipyard releases are exact-SHA evidence exercises. CI never deploys providers o
 ## Candidate gates
 
 1. Freeze the source tree and run `git diff --check`.
-2. Run Ruff, ty, selected Bandit, the complete test suite, and `uv build`.
+2. Run Ruff, ty, selected Bandit, the complete test suite, and
+   `python scripts/build_release_artifacts.py --directory dist` from a clean
+   exact-SHA worktree. The builder derives `SOURCE_DATE_EPOCH` from the commit
+   and normalizes sdist tar/gzip metadata for reproducible artifacts.
 3. Run `python scripts/scan_tracked_secrets.py --root .`.
 4. Export the locked development dependency set and audit it:
 
@@ -20,10 +23,10 @@ Shipyard releases are exact-SHA evidence exercises. CI never deploys providers o
 5. Commit once and record the full SHA.
 6. Create a detached, clean worktree at that SHA and repeat all gates there.
 7. Build the wheel and source archive only from that detached worktree.
-8. Install the exact wheel in a fresh virtual environment with `pip --no-index` and run the onboarding smoke.
+8. Export the locked runtime dependency closure with hashes, install it into a fresh virtual environment, then install the exact canonical wheel with `--no-deps` so no resolver can substitute the artifact. Run `scripts/smoke_installed_release.py` against that installed executable on Linux and macOS.
 9. Run `python scripts/resolve_release_artifacts.py --directory dist` after the build. It derives the exact wheel, source archive, runtime-SBOM, and build-SBOM names from Shipyard's canonical source version and fails if build outputs are missing, ambiguous, or version-mismatched.
 10. Generate the two SBOMs and `dist/SHA256SUMS` using only the resolver-provided names; verify the checksum file names exactly the expected wheel, source archive, runtime SBOM, and build-environment SBOM.
-11. Export a representative completed run with `shipyard evidence export` and verify it from a directory with no ledger access using `shipyard evidence verify`.
+11. Export a representative completed run with `shipyard evidence export` and verify it from a directory with no ledger access using `shipyard evidence verify`. Also export and offline-verify an internal-scope aggregate release dossier.
 
 ## Buzz-first promotion
 

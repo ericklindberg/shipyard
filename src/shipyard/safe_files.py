@@ -60,6 +60,143 @@ def open_relative_regular(root: Path, relative: str) -> int:
             os.close(descriptor)
 
 
+def open_relative_regular_at(root_descriptor: int, relative: str) -> int:
+    """Open a regular file below an already anchored directory descriptor."""
+    parts = relative_parts(relative)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current = os.dup(root_descriptor)
+    try:
+        for component in parts[:-1]:
+            child = os.open(component, directory_flags, dir_fd=current)
+            os.close(current)
+            current = child
+            if not stat.S_ISDIR(os.fstat(current).st_mode):
+                raise SafeFileError("artifact parent is not a directory")
+        descriptor = os.open(parts[-1], file_flags, dir_fd=current)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            raise SafeFileError("artifact is not a regular file")
+        return descriptor
+    except (OSError, ValueError) as exc:
+        raise SafeFileError("file cannot be opened without following symlinks") from exc
+    finally:
+        os.close(current)
+
+
+def open_private_directory(directory: Path, *, create: bool) -> int:
+    """Anchor one absolute private directory, optionally creating missing components."""
+    if not directory.is_absolute():
+        raise SafeFileError("private directory path must be absolute")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current: int | None = None
+    try:
+        current = os.open(Path("/"), directory_flags)
+        for component in directory.relative_to(Path("/")).parts:
+            if component in {"", ".", ".."} or "\x00" in component:
+                raise SafeFileError("private directory path is unsafe")
+            if create:
+                with suppress(FileExistsError):
+                    os.mkdir(component, mode=0o700, dir_fd=current)
+            child = os.open(component, directory_flags, dir_fd=current)
+            os.close(current)
+            current = child
+        if create:
+            os.fchmod(current, 0o700)
+        metadata = os.fstat(current)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+            or (hasattr(os, "geteuid") and metadata.st_uid != os.geteuid())
+        ):
+            raise SafeFileError("private directory ownership or mode is unsafe")
+        result = current
+        current = None
+        return result
+    except (OSError, ValueError, SafeFileError) as exc:
+        raise SafeFileError("private directory cannot be opened safely") from exc
+    finally:
+        if current is not None:
+            os.close(current)
+
+
+def open_or_create_relative_directory(root_descriptor: int, relative: str) -> int:
+    """Create/open a private directory path below a retained root descriptor."""
+    parts = relative_parts(relative)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current = os.dup(root_descriptor)
+    try:
+        for component in parts:
+            with suppress(FileExistsError):
+                os.mkdir(component, mode=0o700, dir_fd=current)
+            child = os.open(component, directory_flags, dir_fd=current)
+            os.close(current)
+            current = child
+            os.fchmod(current, 0o700)
+            metadata = os.fstat(current)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) & 0o077
+                or (hasattr(os, "geteuid") and metadata.st_uid != os.geteuid())
+            ):
+                raise SafeFileError("destination parent ownership or mode is unsafe")
+        result = current
+        current = -1
+        return result
+    except (OSError, SafeFileError) as exc:
+        raise SafeFileError("destination path is unsafe") from exc
+    finally:
+        if current >= 0:
+            os.close(current)
+
+
+def open_relative_directory_at(root_descriptor: int, relative: str) -> int:
+    """Open an existing private directory below a retained root descriptor."""
+    parts = relative_parts(relative)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current = os.dup(root_descriptor)
+    try:
+        for component in parts:
+            child = os.open(component, directory_flags, dir_fd=current)
+            os.close(current)
+            current = child
+            metadata = os.fstat(current)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) & 0o077
+                or (hasattr(os, "geteuid") and metadata.st_uid != os.geteuid())
+            ):
+                raise SafeFileError("private directory ownership or mode is unsafe")
+        result = current
+        current = -1
+        return result
+    except (OSError, SafeFileError) as exc:
+        raise SafeFileError("private directory cannot be opened safely") from exc
+    finally:
+        if current >= 0:
+            os.close(current)
+
+
 def _open_absolute_parent(destination: Path) -> tuple[int, str]:
     if not destination.is_absolute() or destination.name in {"", ".", ".."}:
         raise SafeFileError("private destination path must be absolute")

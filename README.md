@@ -4,7 +4,7 @@ Shipyard is a local-first, POSIX release control plane for exact-source deployme
 
 Shipyard coordinates deployment tools; it does not bypass repository governance, provider protections, mobile-store gates, or runtime verification.
 
-**Project status:** pre-1.0 beta. The local ledger, exact-SHA authorization, Git/GitHub Actions path, and offline evidence verifier are exercised in CI and release dogfood. Other provider adapters remain beta pending operator-run sandbox validation against a disposable live target.
+**Project status:** pre-1.0 beta. The local ledger, exact-SHA authorization, Git/GitHub/Buzz promotion, GitHub Actions adoption, Xcode Cloud/TestFlight internal-canary path, physical-device gate contract, and offline evidence/dossier verifiers are exercised by deterministic tests and release dogfood. OCI, Kubernetes, Render, Heroku, Vercel, and Buzz workflow adapters remain beta pending operator-run live-target validation.
 
 ## Why Shipyard
 
@@ -24,12 +24,14 @@ If any bound evidence changes, the approval becomes invalid. Ambiguous external 
 Python 3.11+ on a POSIX host is required. Install the current signed release wheel directly from GitHub:
 
 ```bash
-uv tool install https://github.com/ericklindberg/shipyard/releases/download/v0.5.2/shipyard_release-0.5.2-py3-none-any.whl
+uv tool install https://github.com/ericklindberg/shipyard/releases/download/v0.6.0/shipyard_release-0.6.0-py3-none-any.whl
 shipyard version --json
 shipyard doctor /path/to/repository --json
 ```
 
-For provenance-sensitive environments, download the wheel and `SHA256SUMS` from the [v0.5.2 release](https://github.com/ericklindberg/shipyard/releases/tag/v0.5.2), verify the checksum, and verify GitHub's artifact attestation before installation. Shipyard's own release workflow never publishes or deploys automatically.
+Keep the canonical wheel filename unchanged. Shipyard's Linux/macOS release gate installs that exact wheel with its hash-locked runtime dependencies, requires `shipyard version --json` to report the embedded exact source SHA, and exercises the installed CLI through governed quickstart and aggregate-dossier verification.
+
+For provenance-sensitive environments, download the wheel and `SHA256SUMS` from the [v0.6.0 release](https://github.com/ericklindberg/shipyard/releases/tag/v0.6.0), verify the checksum, and verify GitHub's artifact attestation before installation. Shipyard's own release workflow never publishes or deploys automatically.
 
 For development from a source checkout:
 
@@ -127,7 +129,7 @@ Schema version 2 is the production path. It forbids raw external argv and routes
 - `oci.promote` — exact manifest/config/source verification, one tag PUT, and digest readback;
 - `kubernetes.deploy` — independent OCI source verification plus UID/resourceVersion-bound immutable-image rollout.
 
-`git.ref` and `github.workflow` are the release-dogfooded paths. The remaining typed adapters have deterministic fake-provider contracts but require live sandbox evidence before a production-readiness claim. Apple, OCI, and Kubernetes remain beta and do not carry a live-provider validation claim.
+`git.ref`, GitHub/Buzz forge promotion, GitHub workflow adoption, Xcode Cloud exact-SHA adoption, and internal TestFlight group attachment are release-dogfooded paths. Meridian build 609 provided the live Apple internal-canary mutation/readback acceptance case; this does not prove physical-device behavior, external TestFlight, App Store submission, OCI, or Kubernetes production readiness.
 
 Use `shipyard connection add`, `check`, and `playbook` for reusable per-user onboarding, or `shipyard init PROVIDER` to generate an unconfigured provider example. Connection profiles and playbooks store environment-variable names, never values. See [Per-user service connections](docs/CONNECTIONS.md).
 
@@ -139,7 +141,7 @@ Shipyard does not replace GitHub Actions. It makes a reviewed GitHub workflow on
 
 Start with the non-mutating contract in [`examples/github-actions/release.yml`](examples/github-actions/release.yml). Shipyard extends that contract in [its active dogfood workflow](.github/workflows/shipyard-contract.yml) with the complete locked test, static-analysis, security, dependency-audit, build, SBOM, checksum, and artifact gate. Both declare the two inputs Shipyard sends and reject a workflow event whose `GITHUB_SHA` differs from the approved candidate. Add your own build, signing, TestFlight, package, or infrastructure jobs after the identity gate, using pinned actions and provider-native protections.
 
-This is the practical boundary: GitHub remains the build/CI environment; Shipyard controls which exact source may enter a release workflow and records what GitHub says happened. Typed Apple adapters can separately prove Xcode Cloud source-commit identity and TestFlight build/group adoption, but they remain beta pending disposable live-provider validation.
+This is the practical boundary: GitHub remains the build/CI environment; Shipyard controls which exact source may enter a release workflow and records what GitHub says happened. Typed Apple release projects can discover and adopt provider-created Xcode Cloud runs by exact SHA, resolve build/app/version/group identities, and render separately approved internal TestFlight actions without copied opaque IDs. External TestFlight additionally requires adapter-verified physical-device evidence.
 
 ## State model
 
@@ -153,6 +155,8 @@ Default release-state directory: `~/.local/state/shipyard`
 - `shipyard.sqlite3` — authoritative runs, attempts, approvals, receipts, readbacks, and hash-chained audit events;
 - `runs/<run-id>.json` — derived, atomic, mode-`0600` operator manifests;
 - `locks/` — per-run and canonical destination locks.
+- `observations/` — immutable private GET-only provider observations, keyed by project digest, exact SHA, provider, and observation digest;
+- `gates/` — immutable exact-SHA operator attestations and bound evidence hashes.
 
 The ledger migrates historical schemas transactionally using SQLite `user_version`. JSON manifests are rebuilt from SQLite and advance monotonically.
 
@@ -204,6 +208,7 @@ Read [SECURITY.md](SECURITY.md) for the threat model and reporting process. Impo
 - [Exact-SHA release and provenance process](docs/RELEASING.md)
 - [Adapter contract and roadmap](docs/ADAPTERS.md)
 - [Portable offline evidence](docs/EVIDENCE.md)
+- [Standalone release lifecycle](docs/STANDALONE_RELEASE.md)
 - [Adoption guide: quickstart, signed approvals, Apple, OCI, and Kubernetes](docs/ADOPTION.md)
 - [MVP acceptance contract](docs/MVP.md)
 

@@ -20,11 +20,12 @@ Successful results, including nonzero operational states such as a blocked check
 {
   "api_version": "shipyard.cli/v1",
   "ok": true,
+  "status": "command-specific stable status",
   "data": {}
 }
 ```
 
-`data` is command-specific. Process exit status remains authoritative for automation; `ok` means Shipyard produced a valid command result, not that a deployment occurred or a provider adopted it.
+`data` is command-specific. The additive top-level `status` mirrors `data.status`, `data.state`, `data.verdict`, or a deterministic fallback and avoids command-specific envelope traversal. Process exit status remains authoritative for automation; `ok` means Shipyard produced a valid command result, not that a deployment occurred or a provider adopted it.
 
 ## Error envelope
 
@@ -34,13 +35,18 @@ Handled Shipyard errors are written to standard error:
 {
   "api_version": "shipyard.cli/v1",
   "ok": false,
+  "status": "error",
   "error": {
-    "message": "redacted operator-safe message"
+    "code": "STABLE_MACHINE_CODE",
+    "message": "redacted operator-safe message",
+    "phase": "config|authorization|execution|reconciliation|verification",
+    "retryable": false,
+    "provider_mutation": false
   }
 }
 ```
 
-Errors never include credential values. Argument-parser usage errors that occur before Shipyard can establish the selected command remain standard `argparse` diagnostics.
+Errors never include credential values. When `--json` is present, argument-parser failures also emit exactly one JSON error document on stderr with code `INVALID_ARGUMENT`; stdout remains empty.
 
 ## Compatibility
 

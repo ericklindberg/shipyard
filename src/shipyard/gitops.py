@@ -94,3 +94,16 @@ def snapshot_repository(path: str | Path) -> RepositorySnapshot:
         upstream_sha=upstream_sha,
         worktree_digest=worktree_digest,
     )
+
+
+def named_remote_url(path: str | Path, remote: str) -> str:
+    if not remote or not all(
+        character.isalnum() or character in "._-" for character in remote
+    ):
+        raise GitError("Git remote name is invalid")
+    repo = Path(path).expanduser().resolve()
+    output = _git(repo, "remote", "get-url", "--all", remote)
+    urls = output.splitlines() if isinstance(output, str) else []
+    if len(urls) != 1 or not urls[0]:
+        raise GitError("Git remote must resolve to exactly one URL")
+    return urls[0]

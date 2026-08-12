@@ -61,6 +61,25 @@ def canonical_remote(value: str | None) -> str | None:
     return value.removesuffix(".git")
 
 
+def canonical_repository_identity(value: str | None) -> str | None:
+    """Normalize HTTPS/SSH clone URLs to a scheme-independent host/path identity."""
+    canonical = canonical_remote(value)
+    if canonical is None:
+        return None
+    parsed = urlsplit(canonical)
+    if not parsed.scheme or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    if parsed.query or parsed.fragment:
+        return None
+    port = parsed.port
+    if port in {22, 443}:
+        port = None
+    authority = parsed.hostname.lower() + (f":{port}" if port else "")
+    path = parsed.path.strip("/").removesuffix(".git")
+    if not path or any(part in {"", ".", ".."} for part in path.split("/")):
+        return None
+    return f"{authority}/{path}"
+
 
 def _artifact_evidence(run: ReleaseRun) -> list[dict[str, object]]:
     root = run.repo_path.resolve()

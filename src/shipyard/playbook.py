@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from .models import ArtifactSpec, Playbook, Step
+from .provider_contracts import (
+    action_supported,
+    provider_option_error,
+    unsupported_action_options,
+)
 from .redact import redact_argv
 
 
@@ -776,6 +781,21 @@ def load_playbook(path: str | Path) -> Playbook:
     artifacts = _parse_artifacts(data)
     approval_quorum = _parse_approval_quorum(data)
     steps = _parse_steps(raw_steps, schema)
+    for step in steps:
+        if step.action is None:
+            continue
+        if not action_supported(provider, step.action):
+            raise PlaybookError(
+                f"provider {provider} does not support action {step.action}"
+            )
+        unsupported = unsupported_action_options(step.action, step.config)
+        if unsupported:
+            raise PlaybookError(
+                f"unsupported config option for {step.action}: {unsupported[0]}"
+            )
+        semantic_error = provider_option_error(provider, step.action, step.config)
+        if semantic_error is not None:
+            raise PlaybookError(semantic_error)
     if allow_dirty and any(step.effect == "external" for step in steps):
         raise PlaybookError("external steps require a clean source; allow_dirty must be false")
     return Playbook(

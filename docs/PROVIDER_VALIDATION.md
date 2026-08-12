@@ -41,12 +41,13 @@ The harness:
 
 Failures and uncertain outcomes are not retried automatically.
 
-## Validation status through 0.3.0
+## Validation status through 0.6.0
 
 | Provider path | Automated contract | Retained evidence through 2026-08-10 | Release claim |
 |---|---|---|---|
 | Git/GitHub named remote | Unit, integration, and exact-ref readback | Passed against a disposable local bare Git remote, including one exact-SHA mutation and readback | Implementation verified; live GitHub account contract still operator-dependent |
 | GitHub Actions | Fake HTTPS transport verifies stable repository/workflow identity, exact ref-to-SHA fencing, durable dispatch run ID, and run readback | Exact-SHA non-deploying workflow dispatch and semantic readback succeeded during release dogfood against the public Shipyard repository | Beta and release-dogfooded; downstream deployment semantics remain operator-specific |
+| Apple Xcode Cloud / internal TestFlight | Deterministic exact-SHA discovery, watched-repository/ref traversal, run/build/app/version/group relationships, one-attempt mutation, readback, and physical-gate contracts | Meridian exact candidate `d08b30f59542773c41c5d105105472e30265028d`: Xcode Cloud run/build 609 succeeded and valid; released Shipyard attached only internal `Testing`; authoritative readback confirmed membership and no external group | Governed internal-canary path live-proven once; physical-device, external TestFlight, and App Store submission remain separate unavailable gates |
 | Buzz-hosted Git | Same `git.ref` contract | Covered by named-remote Git path; no live Buzz-hosted repository target configured | Beta |
 | Buzz workflow | Fake runner verifies `workflows get`; execute/readback contract covered | No sandbox workflow profile or `BUZZ_PRIVATE_KEY` available | Beta; live validation required |
 | Render | Fake HTTPS transport, exact service identity, mutation/readback contract | No sandbox service profile or credential reference available | Beta; live validation required |

@@ -10,10 +10,14 @@ import stat
 import sys
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from .adapters.base import AdapterError
 from .adapters.registry import AdapterRegistry
+from .apple_release import (
+    AppleReleaseCoordinates,
+    render_testflight_playbook,
+)
 from .approvals import (
     ApprovalPacketError,
     build_approval_statement,
@@ -25,7 +29,7 @@ from .approvals import (
     verify_signed_approval_ssh,
 )
 from .bootstrap import BootstrapBundle, BootstrapInputError, plan_github_bootstrap
-from .candidate import CandidateError
+from .candidate import CandidateError, canonical_repository_identity
 from .connections import (
     ConnectionError,
     ConnectionStore,
@@ -33,6 +37,7 @@ from .connections import (
     render_playbook,
     verify_connection,
 )
+from .dossier import DossierError, export_release_dossier, verify_release_dossier
 from .evidence import EvidenceError, export_evidence_bundle, verify_evidence_bundle
 from .executor import (
     AuthorizationError,
@@ -41,12 +46,26 @@ from .executor import (
     ReleaseExecutor,
     UncertainOutcomeError,
 )
-from .gitops import GitError, snapshot_repository
+from .gates import GateAttestation, GateError, GateStore
+from .gitops import GitError, named_remote_url, snapshot_repository
 from .identity import package_version, runtime_identity
 from .ledger import Ledger, LedgerError
 from .models import ReleaseRun, RepositorySnapshot
+from .observations import ObservationError, ObservationStore, ReleaseObservation
 from .playbook import PlaybookError, load_playbook
 from .quickstart import QuickstartError, run_quickstart
+from .release_inspection import inspect_release
+from .release_phases import (
+    ReleasePhaseError,
+    render_release_phase,
+    render_xcode_build_playbook,
+)
+from .release_project import (
+    ReleaseProjectError,
+    load_release_project,
+    render_project_template,
+    validate_source_sha,
+)
 from .reports import load_verified_report, render_html, render_markdown
 from .runtime import RuntimeIdentityError
 from .wait import WaitState, wait_for_reconciliation
@@ -114,18 +133,59 @@ def _run_payload(run: ReleaseRun, ledger: Ledger | None = None) -> dict[str, Any
 _JSON_API_VERSION = "shipyard.cli/v1"
 
 
+def _payload_status(payload: Any) -> str:
+    if isinstance(payload, dict):
+        status = payload.get("status")
+        if isinstance(status, str) and status:
+            return status
+        state = payload.get("state")
+        if isinstance(state, str) and state:
+            return state
+        valid = payload.get("valid")
+        if isinstance(valid, bool):
+            return "verified" if valid else "invalid"
+        ready = payload.get("ready")
+        if isinstance(ready, bool):
+            return "ready" if ready else "blocked"
+        verified = payload.get("verified")
+        if isinstance(verified, bool):
+            return "verified" if verified else "invalid"
+    return "succeeded"
+
+
 def _json_envelope(payload: Any) -> dict[str, Any]:
-    return {"api_version": _JSON_API_VERSION, "ok": True, "data": payload}
+    return {
+        "api_version": _JSON_API_VERSION,
+        "ok": True,
+        "status": _payload_status(payload),
+        "data": payload,
+    }
 
 
-def _print_error(message: str, *, as_json: bool) -> None:
+def _print_error(
+    message: str,
+    *,
+    as_json: bool,
+    code: str = "INVALID_REQUEST",
+    phase: str = "config",
+    retryable: bool = False,
+    mutation: str = "none",
+) -> None:
     if as_json:
         print(
             json.dumps(
                 {
                     "api_version": _JSON_API_VERSION,
                     "ok": False,
-                    "error": {"message": message},
+                    "status": "invalid",
+                    "data": None,
+                    "error": {
+                        "code": code,
+                        "message": message,
+                        "retryable": retryable,
+                        "mutation": mutation,
+                        "phase": phase,
+                    },
                 },
                 indent=2,
                 sort_keys=True,
@@ -134,6 +194,15 @@ def _print_error(message: str, *, as_json: bool) -> None:
         )
         return
     print(f"shipyard: {message}", file=sys.stderr)
+
+
+class CliArgumentError(ValueError):
+    pass
+
+
+class ShipyardArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise CliArgumentError(message)
 
 
 def _print(payload: Any, *, as_json: bool) -> None:
@@ -288,6 +357,105 @@ def _result_code(run: ReleaseRun) -> int:
     return 1
 
 
+def _named_paths(values: list[str], option: str) -> tuple[tuple[str, str], ...]:
+    parsed: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for value in values:
+        name, separator, path = value.partition("=")
+        if not separator or not name or not path or name in seen:
+            raise DossierError(f"{option} must use unique NAME=PATH values")
+        seen.add(name)
+        parsed.append((name, path))
+    return tuple(parsed)
+
+
+def _release_source_sha(repo: str, configured: str | None) -> tuple[str, RepositorySnapshot]:
+    snapshot = snapshot_repository(repo)
+    if snapshot.dirty:
+        raise GitError("release inspection requires a clean source worktree")
+    source_sha = validate_source_sha(configured) if configured else snapshot.sha
+    if source_sha != snapshot.sha:
+        raise GitError("configured release source SHA does not match the inspected repository HEAD")
+    return source_sha, snapshot
+
+
+def _verify_release_project_source(project_remote: str, snapshot: RepositorySnapshot) -> None:
+    configured = canonical_repository_identity(project_remote)
+    observed = canonical_repository_identity(snapshot.remote_url)
+    if configured is None or observed is None or configured != observed:
+        raise GitError(
+            "release project source_remote does not match the inspected Git repository"
+        )
+
+
+def _apple_coordinates_from_observation(
+    observation: ReleaseObservation,
+) -> AppleReleaseCoordinates:
+    evidence = observation.evidence
+    required = {
+        "workflow_id": evidence.get("workflow_id"),
+        "repository_id": evidence.get("repository_id"),
+        "repository_identity": evidence.get("repository_identity"),
+        "git_reference_id": evidence.get("git_reference_id"),
+        "git_reference_name": evidence.get("git_reference_name"),
+        "app_id": evidence.get("app_id"),
+        "bundle_id": evidence.get("bundle_id"),
+        "run_id": evidence.get("run_id"),
+        "run_number": evidence.get("run_number"),
+        "build_id": evidence.get("build_id"),
+        "build_number": evidence.get("build_number"),
+        "processing_state": evidence.get("processing_state"),
+        "pre_release_version_id": evidence.get("pre_release_version_id"),
+        "marketing_version": evidence.get("marketing_version"),
+        "beta_group_id": evidence.get("beta_group_id"),
+        "beta_group_name": evidence.get("beta_group_name"),
+    }
+    if observation.provider != "apple" or observation.status != "succeeded":
+        raise ObservationError("TestFlight playbook requires a successful Apple observation")
+    if any(not isinstance(value, str) or not value for value in required.values()):
+        raise ObservationError("Apple observation lacks resolved release coordinates")
+    expired = evidence.get("expired")
+    internal = evidence.get("beta_group_internal")
+    relationship = evidence.get("relationship_present")
+    if not isinstance(expired, bool) or not isinstance(internal, bool) or not isinstance(
+        relationship, bool
+    ):
+        raise ObservationError("Apple observation release state is malformed")
+    return AppleReleaseCoordinates(
+        source_sha=observation.source_sha,
+        workflow_id=str(required["workflow_id"]),
+        repository_id=str(required["repository_id"]),
+        repository_identity=str(required["repository_identity"]),
+        git_reference_id=str(required["git_reference_id"]),
+        git_reference_name=str(required["git_reference_name"]),
+        app_id=str(required["app_id"]),
+        bundle_id=str(required["bundle_id"]),
+        run_id=str(required["run_id"]),
+        run_number=str(required["run_number"]),
+        run_status=observation.status,
+        build_id=str(required["build_id"]),
+        build_number=str(required["build_number"]),
+        processing_state=str(required["processing_state"]),
+        expired=expired,
+        pre_release_version_id=str(required["pre_release_version_id"]),
+        marketing_version=str(required["marketing_version"]),
+        beta_group_id=str(required["beta_group_id"]),
+        beta_group_name=str(required["beta_group_name"]),
+        beta_group_internal=internal,
+        relationship_present=relationship,
+        internal_build_state=(
+            str(evidence["internal_build_state"])
+            if isinstance(evidence.get("internal_build_state"), str)
+            else None
+        ),
+        external_build_state=(
+            str(evidence["external_build_state"])
+            if isinstance(evidence.get("external_build_state"), str)
+            else None
+        ),
+    )
+
+
 def _connection_options(args: argparse.Namespace) -> dict[str, object]:
     provider = args.provider
     if provider in {"github", "buzz-git"}:
@@ -432,12 +600,14 @@ def _doctor(repo: str, state_dir: str, playbook_path: str | None) -> tuple[dict[
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = ShipyardArgumentParser(
         prog="shipyard",
         description="Candidate-bound deployment control for humans and coding agents.",
     )
     parser.add_argument("--version", action="version", version=f"shipyard {package_version()}")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(
+        dest="command", required=True, parser_class=ShipyardArgumentParser
+    )
 
     quickstart_parser = subparsers.add_parser(
         "quickstart", help="Run a credential-free governed local release demonstration"
@@ -571,6 +741,184 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("repo", nargs="?", default=".")
     inspect_parser.add_argument("--json", action="store_true")
 
+    release_parser = subparsers.add_parser(
+        "release", help="Operate a standalone exact-SHA multi-provider release"
+    )
+    release_subparsers = release_parser.add_subparsers(
+        dest="release_command", required=True
+    )
+    release_init = release_subparsers.add_parser(
+        "init", help="Create a stable non-secret release project manifest"
+    )
+    release_init.add_argument("--output", default="shipyard.release.toml")
+    release_init.add_argument("--force", action="store_true")
+    release_init.add_argument("--json", action="store_true")
+
+    release_project = release_subparsers.add_parser(
+        "project", help="Initialize, validate, or show stable release-project configuration"
+    )
+    release_project_subparsers = release_project.add_subparsers(
+        dest="release_project_command",
+        required=True,
+        parser_class=ShipyardArgumentParser,
+    )
+    project_init = release_project_subparsers.add_parser(
+        "init", help="Create a non-secret release project without network access"
+    )
+    project_init.add_argument("path", nargs="?", default="shipyard.release.toml")
+    project_init.add_argument("--force", action="store_true")
+    project_init.add_argument("--json", action="store_true")
+    project_validate = release_project_subparsers.add_parser(
+        "validate", help="Validate a release project offline"
+    )
+    project_validate.add_argument("path")
+    project_validate.add_argument("--json", action="store_true")
+    project_show = release_project_subparsers.add_parser(
+        "show", help="Show redacted stable release-project coordinates offline"
+    )
+    project_show.add_argument("path")
+    project_show.add_argument("--json", action="store_true")
+
+    release_inspect = release_subparsers.add_parser(
+        "inspect", help="Adopt current GitHub and Apple state with GET-only exact-SHA discovery"
+    )
+    release_inspect.add_argument("repo", nargs="?", default=".")
+    release_inspect.add_argument("--project", required=True)
+    release_inspect.add_argument("--source-sha")
+    release_inspect.add_argument("--expected-build-number")
+    release_inspect.add_argument("--provider", choices=["all", "github", "apple"], default="all")
+    release_inspect.add_argument("--allow-network", action="store_true")
+    release_inspect.add_argument("--state-dir", default=str(_default_state_dir()))
+    release_inspect.add_argument("--json", action="store_true")
+
+    release_wait = release_subparsers.add_parser(
+        "wait",
+        help="Poll exact-SHA provider state with GET-only discovery and no persistence",
+    )
+    release_wait.add_argument("repo", nargs="?", default=".")
+    release_wait.add_argument("--project", required=True)
+    release_wait.add_argument("--source-sha")
+    release_wait.add_argument("--expected-build-number")
+    release_wait.add_argument(
+        "--provider", choices=["all", "github", "apple"], default="all"
+    )
+    release_wait.add_argument("--allow-network", action="store_true")
+    release_wait.add_argument("--timeout", type=float, default=900.0)
+    release_wait.add_argument("--interval", type=float, default=15.0)
+    release_wait.add_argument("--json", action="store_true")
+
+    release_playbook = release_subparsers.add_parser(
+        "playbook", help="Render an exact resolved TestFlight playbook from one Apple observation"
+    )
+    release_playbook.add_argument("--project", required=True)
+    release_playbook.add_argument("--source-sha", required=True)
+    release_playbook.add_argument(
+        "--phase",
+        choices=[
+            "github-candidate",
+            "buzz-candidate",
+            "buzz-main",
+            "github-main",
+            "xcode-build",
+            "testflight",
+        ],
+        default="testflight",
+    )
+    release_playbook.add_argument("--apple-observation")
+    release_playbook.add_argument("--physical-device-attestation")
+    release_playbook.add_argument("--repo", default=".")
+    release_playbook.add_argument("--output", required=True)
+    release_playbook.add_argument("--target", default="production")
+    release_playbook.add_argument("--state-dir", default=str(_default_state_dir()))
+    release_playbook.add_argument("--force", action="store_true")
+    release_playbook.add_argument("--json", action="store_true")
+
+    release_observation = release_subparsers.add_parser(
+        "observation", help="List or verify immutable read-only provider observations"
+    )
+    release_observation_subparsers = release_observation.add_subparsers(
+        dest="release_observation_command",
+        required=True,
+        parser_class=ShipyardArgumentParser,
+    )
+    observation_list = release_observation_subparsers.add_parser(
+        "list", help="List immutable observations without network or state mutation"
+    )
+    observation_list.add_argument("--project")
+    observation_list.add_argument("--project-digest")
+    observation_list.add_argument("--source-sha")
+    observation_list.add_argument("--provider", choices=["github", "apple"])
+    observation_list.add_argument("--limit", type=int, default=100)
+    observation_list.add_argument("--state-dir", default=str(_default_state_dir()))
+    observation_list.add_argument("--json", action="store_true")
+    observation_show = release_observation_subparsers.add_parser(
+        "show", help="Verify and show one immutable observation"
+    )
+    observation_show.add_argument("observation")
+    observation_show.add_argument("--state-dir", default=str(_default_state_dir()))
+    observation_show.add_argument("--json", action="store_true")
+
+    release_gate = release_subparsers.add_parser(
+        "gate", help="Record or inspect exact-SHA operator gate attestations"
+    )
+    release_gate_subparsers = release_gate.add_subparsers(
+        dest="release_gate_command", required=True
+    )
+    gate_attest = release_gate_subparsers.add_parser(
+        "attest", help="Record an immutable gate result and evidence"
+    )
+    gate_attest.add_argument("gate")
+    gate_attest.add_argument("--project", required=True)
+    gate_attest.add_argument("--source-sha", required=True)
+    gate_attest.add_argument("--status", choices=["passed", "failed", "pending"], required=True)
+    gate_attest.add_argument("--actor", required=True)
+    gate_attest.add_argument("--reason", required=True)
+    gate_attest.add_argument("--evidence", action="append", default=[])
+    gate_attest.add_argument("--apple-observation")
+    gate_attest.add_argument("--app-version")
+    gate_attest.add_argument("--build-number")
+    gate_attest.add_argument("--device")
+    gate_attest.add_argument("--os-version")
+    gate_attest.add_argument("--check", action="append", default=[])
+    gate_attest.add_argument("--state-dir", default=str(_default_state_dir()))
+    gate_attest.add_argument("--json", action="store_true")
+    gate_show = release_gate_subparsers.add_parser(
+        "show", help="Verify and show one immutable gate attestation"
+    )
+    gate_show.add_argument("attestation")
+    gate_show.add_argument("--state-dir", default=str(_default_state_dir()))
+    gate_show.add_argument("--json", action="store_true")
+
+    release_dossier = release_subparsers.add_parser(
+        "dossier", help="Export or verify one aggregate offline release dossier"
+    )
+    release_dossier_subparsers = release_dossier.add_subparsers(
+        dest="release_dossier_command", required=True
+    )
+    dossier_export = release_dossier_subparsers.add_parser(
+        "export", help="Export runs, observations, gates, and artifacts as one dossier"
+    )
+    dossier_export.add_argument("--project", required=True)
+    dossier_export.add_argument("--source-sha", required=True)
+    dossier_export.add_argument(
+        "--scope", choices=["internal", "external", "production"], required=True
+    )
+    dossier_export.add_argument("--run", action="append", default=[], metavar="NAME=PATH")
+    dossier_export.add_argument(
+        "--observation", action="append", default=[], metavar="NAME=PATH"
+    )
+    dossier_export.add_argument("--gate", action="append", default=[], metavar="PATH")
+    dossier_export.add_argument(
+        "--artifact", action="append", default=[], metavar="NAME=PATH"
+    )
+    dossier_export.add_argument("--output", required=True)
+    dossier_export.add_argument("--json", action="store_true")
+    dossier_verify = release_dossier_subparsers.add_parser(
+        "verify", help="Verify a release dossier without ledger or network access"
+    )
+    dossier_verify.add_argument("bundle")
+    dossier_verify.add_argument("--json", action="store_true")
+
     plan_parser = subparsers.add_parser("plan", help="Render a release plan without running it")
     plan_parser.add_argument("repo", nargs="?", default=".")
     plan_parser.add_argument("--playbook", required=True)
@@ -681,7 +1029,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    json_requested = "--json" in arguments
+    try:
+        args = parser.parse_args(arguments)
+    except CliArgumentError as exc:
+        _print_error(
+            str(exc),
+            as_json=json_requested,
+            code="INVALID_ARGUMENT",
+            phase="config",
+        )
+        return 2
     try:
         if args.command == "quickstart":
             summary = run_quickstart(args.directory)
@@ -880,6 +1239,377 @@ def main(argv: list[str] | None = None) -> int:
                 as_json=args.json,
             )
             return 0
+        if args.command == "release":
+            operation = args.release_command
+            if operation in {"init", "project"} and (
+                operation == "init" or args.release_project_command == "init"
+            ):
+                output = args.output if operation == "init" else args.path
+                destination = _write_private_text(
+                    output,
+                    render_project_template(),
+                    force=args.force,
+                )
+                destination.chmod(0o644)
+                _print(
+                    {
+                        "created": str(destination),
+                        "status": "created",
+                        "schema_version": "shipyard.release-project/v1",
+                        "secrets_stored": False,
+                        "provider_mutations": 0,
+                        "next_steps": [
+                            f"edit {destination}",
+                            f"shipyard release project validate {destination} --json",
+                            (
+                                f"shipyard release inspect --project {destination} "
+                                "--allow-network --json"
+                            ),
+                        ],
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if operation == "project":
+                project = load_release_project(args.path)
+                payload = {
+                    "status": "valid",
+                    "valid": True,
+                    "project": project.public_payload(),
+                    "project_digest": project.digest,
+                    "offline": True,
+                    "provider_mutations": 0,
+                }
+                _print(payload, as_json=args.json)
+                return 0
+            if operation == "observation":
+                store = ObservationStore(args.state_dir)
+                if args.release_observation_command == "show":
+                    observation = store.load(args.observation)
+                    _print(
+                        {
+                            "status": observation.status,
+                            "observation": observation.payload(),
+                            "path": str(observation.path),
+                            "offline": True,
+                            "provider_mutations": 0,
+                        },
+                        as_json=args.json,
+                    )
+                    return 0
+                project_digest = args.project_digest
+                if args.project:
+                    project = load_release_project(args.project)
+                    if project_digest is not None and project_digest != project.digest:
+                        raise ObservationError(
+                            "observation project and project digest filters do not match"
+                        )
+                    project_digest = project.digest
+                observations = store.list(
+                    project_digest=project_digest,
+                    source_sha=args.source_sha,
+                    provider=args.provider,
+                    limit=args.limit,
+                )
+                _print(
+                    {
+                        "status": "listed",
+                        "observations": [
+                            {
+                                **observation.payload(),
+                                "path": str(observation.path),
+                            }
+                            for observation in observations
+                        ],
+                        "count": len(observations),
+                        "offline": True,
+                        "provider_mutations": 0,
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if operation == "dossier" and args.release_dossier_command == "verify":
+                report = verify_release_dossier(args.bundle)
+                _print(report, as_json=args.json)
+                return 0 if report.get("valid") is True else 1
+            if operation == "gate" and args.release_gate_command == "show":
+                gate = GateStore(args.state_dir).load(args.attestation)
+                _print(gate.payload(), as_json=args.json)
+                return 0
+            project = load_release_project(args.project)
+            if operation in {"inspect", "wait"}:
+                if not args.allow_network:
+                    raise ReleaseProjectError(
+                        f"release {operation} requires explicit --allow-network consent"
+                    )
+                source_sha, snapshot = _release_source_sha(args.repo, args.source_sha)
+                _verify_release_project_source(project.source_remote, snapshot)
+
+                def current_inspection():
+                    return inspect_release(
+                        project,
+                        source_sha,
+                        provider=args.provider,
+                        expected_build_number=args.expected_build_number,
+                    )
+
+                if operation == "wait":
+                    result = wait_for_reconciliation(
+                        current_inspection,
+                        timeout=args.timeout,
+                        interval=args.interval,
+                    )
+                    inspection = result.last_value
+                    if inspection is None:
+                        raise ObservationError("release wait produced no provider observation")
+                    payload = {
+                        **inspection.payload(),
+                        "state": result.state.value,
+                        "polls": result.polls,
+                        "last_status": result.last_status,
+                        "source": _snapshot_payload(snapshot),
+                        "project_digest": project.digest,
+                        "persisted": False,
+                        "next_step": (
+                            "shipyard release inspect "
+                            f"--project {project.path} --source-sha {source_sha} "
+                            f"--provider {args.provider} --allow-network --json"
+                        ),
+                    }
+                    _print(payload, as_json=args.json)
+                    if result.state is WaitState.SUCCEEDED:
+                        return 0
+                    return 1 if result.state is WaitState.FAILED else 4
+
+                inspection = current_inspection()
+                store = ObservationStore(args.state_dir)
+                observations: list[dict[str, object]] = []
+                for provider_inspection in inspection.inspections:
+                    observation = ReleaseObservation.create(
+                        provider_inspection.provider,
+                        project.digest,
+                        source_sha,
+                        provider_inspection.readback,
+                    )
+                    path = store.save(observation)
+                    observations.append(
+                        {
+                            "provider": observation.provider,
+                            "status": observation.status,
+                            "state": observation.evidence.get("state", "present"),
+                            "digest": observation.digest,
+                            "path": str(path),
+                            "evidence": observation.evidence,
+                        }
+                    )
+                payload = {
+                    "project": project.public_payload(),
+                    "project_digest": project.digest,
+                    "source": _snapshot_payload(snapshot),
+                    "source_sha": source_sha,
+                    "status": inspection.status,
+                    "state": inspection.status,
+                    "read_only": True,
+                    "provider_mutations": 0,
+                    "observations": observations,
+                }
+                _print(payload, as_json=args.json)
+                return 0 if inspection.status == "succeeded" else 4
+            source_sha = validate_source_sha(args.source_sha)
+            if operation == "playbook":
+                if args.phase in {
+                    "github-candidate",
+                    "buzz-candidate",
+                    "buzz-main",
+                    "github-main",
+                }:
+                    _, phase_snapshot = _release_source_sha(args.repo, source_sha)
+                    _verify_release_project_source(
+                        project.source_remote, phase_snapshot
+                    )
+                    repo = phase_snapshot.path.resolve()
+                    destination = _write_private_text(
+                        args.output,
+                        render_release_phase(
+                            project,
+                            source_sha=source_sha,
+                            phase=args.phase,
+                            repo_path=str(repo),
+                            target=args.target,
+                        ),
+                        force=args.force,
+                    )
+                    load_playbook(destination)
+                    _print(
+                        {
+                            "created": str(destination),
+                            "phase": args.phase,
+                            "source_sha": source_sha,
+                            "requires_candidate_approval": True,
+                            "provider_mutations": 0,
+                            "next_step": f"shipyard run {repo} --playbook {destination}",
+                        },
+                        as_json=args.json,
+                    )
+                    return 0
+                if project.apple is None:
+                    raise ReleaseProjectError("release project does not configure Apple")
+                if not args.apple_observation:
+                    raise ObservationError(
+                        f"{args.phase} playbook requires --apple-observation"
+                    )
+                observation = ObservationStore(args.state_dir).load(args.apple_observation)
+                if (
+                    observation.project_digest != project.digest
+                    or observation.source_sha != source_sha
+                ):
+                    raise ObservationError(
+                        "Apple observation does not match project and source SHA"
+                    )
+                if args.phase == "xcode-build":
+                    _, phase_snapshot = _release_source_sha(args.repo, source_sha)
+                    _verify_release_project_source(
+                        project.source_remote, phase_snapshot
+                    )
+                    repo = phase_snapshot.path.resolve()
+                    remote_url = named_remote_url(repo, project.apple.source_git_remote)
+                    if canonical_repository_identity(remote_url) != canonical_repository_identity(
+                        project.apple.source_remote
+                    ):
+                        raise GitError(
+                            "Apple source_git_remote does not match Apple source_remote"
+                        )
+                    destination = _write_private_text(
+                        args.output,
+                        render_xcode_build_playbook(
+                            project,
+                            source_sha=source_sha,
+                            repo_path=str(repo),
+                            source_remote=project.apple.source_git_remote,
+                            source_observation=observation,
+                            target=args.target,
+                        ),
+                        force=args.force,
+                    )
+                    load_playbook(destination)
+                    _print(
+                        {
+                            "created": str(destination),
+                            "phase": "xcode-build",
+                            "source_sha": source_sha,
+                            "apple_observation_digest": observation.digest,
+                            "requires_candidate_approval": True,
+                            "provider_mutations": 0,
+                            "next_step": f"shipyard run {repo} --playbook {destination}",
+                        },
+                        as_json=args.json,
+                    )
+                    return 0
+                coordinates = _apple_coordinates_from_observation(observation)
+                physical_gate = (
+                    GateStore(args.state_dir).load(args.physical_device_attestation)
+                    if args.physical_device_attestation
+                    else None
+                )
+                release_scope = (
+                    "internal" if coordinates.beta_group_internal else "external"
+                )
+                required_gates = set(project.required_gate_names(release_scope))
+                unsupported_gates = sorted(required_gates - {"physical-device"})
+                if unsupported_gates:
+                    raise GateError(
+                        "TestFlight playbook cannot satisfy required release gate: "
+                        + unsupported_gates[0]
+                    )
+                if "physical-device" in required_gates and physical_gate is None:
+                    raise GateError(
+                        "TestFlight playbook requires the project physical-device gate"
+                    )
+                destination = _write_private_text(
+                    args.output,
+                    render_testflight_playbook(
+                        coordinates,
+                        credential_config=project.apple.credential_config,
+                        name=f"{project.name}-{coordinates.build_number}-{coordinates.beta_group_name}",
+                        target=args.target,
+                        project_digest=project.digest,
+                        apple_observation_digest=observation.digest,
+                        physical_device_attestation=physical_gate,
+                    ),
+                    force=args.force,
+                )
+                load_playbook(destination)
+                _print(
+                    {
+                        "created": str(destination),
+                        "source_sha": source_sha,
+                        "apple_observation_digest": observation.digest,
+                        "destination": coordinates.operation_destination,
+                        "release_scope": release_scope,
+                        "required_gates": sorted(required_gates),
+                        "requires_candidate_approval": True,
+                        "provider_mutations": 0,
+                        "next_step": f"shipyard run . --playbook {destination}",
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if operation == "gate":
+                store = GateStore(args.state_dir)
+                apple_observation_digest = None
+                if args.apple_observation:
+                    observation = ObservationStore(args.state_dir).load(
+                        args.apple_observation
+                    )
+                    if (
+                        observation.provider != "apple"
+                        or observation.project_digest != project.digest
+                        or observation.source_sha != source_sha
+                    ):
+                        raise ObservationError(
+                            "gate Apple observation does not match project and source SHA"
+                        )
+                    apple_observation_digest = observation.digest
+                gate = GateAttestation.create(
+                    gate=args.gate,
+                    project_digest=project.digest,
+                    source_sha=source_sha,
+                    status=args.status,
+                    actor=args.actor,
+                    reason=args.reason,
+                    evidence_paths=args.evidence,
+                    apple_observation_digest=apple_observation_digest,
+                    app_version=args.app_version,
+                    build_number=args.build_number,
+                    device=args.device,
+                    os_version=args.os_version,
+                    checks=args.check,
+                )
+                gate_path = store.save(gate)
+                _print(
+                    {
+                        **gate.payload(),
+                        "path": str(gate_path),
+                    },
+                    as_json=args.json,
+                )
+                return 0 if gate.status == "passed" else 1 if gate.status == "failed" else 4
+            dossier_path = export_release_dossier(
+                project=project,
+                source_sha=source_sha,
+                release_scope=args.scope,
+                run_bundles=_named_paths(args.run, "--run"),
+                observations=_named_paths(args.observation, "--observation"),
+                gates=args.gate,
+                artifacts=_named_paths(args.artifact, "--artifact"),
+                output=args.output,
+            )
+            report = verify_release_dossier(dossier_path)
+            _print(
+                {"bundle": str(dossier_path), **report},
+                as_json=args.json,
+            )
+            return 0
         if args.command == "inspect":
             _print(_snapshot_payload(snapshot_repository(args.repo)), as_json=args.json)
             return 0
@@ -1054,13 +1784,18 @@ def main(argv: list[str] | None = None) -> int:
         CandidateError,
         BootstrapInputError,
         ConnectionError,
+        DossierError,
         EvidenceError,
+        GateError,
         GitError,
         LedgerError,
+        ObservationError,
         PlaybookError,
         ProcessInterrupted,
         ProvenanceDriftError,
         QuickstartError,
+        ReleasePhaseError,
+        ReleaseProjectError,
         RuntimeIdentityError,
         ValueError,
     ) as exc:
