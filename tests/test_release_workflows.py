@@ -37,7 +37,8 @@ def test_standalone_release_guide_covers_complete_explicit_control_lifecycle():
     assert "shipyard release wait . --project .shipyard/release.toml" in normalized
     assert "shipyard release inspect . --project .shipyard/release.toml" in normalized
     assert "shipyard release gate attest physical-device --project" in normalized
-    assert "--repo ." not in guide
+    assert "shipyard release wait --repo" not in normalized
+    assert "shipyard release inspect --repo" not in normalized
     assert "--gate physical-device" not in guide
 
 

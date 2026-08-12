@@ -325,18 +325,18 @@ class ReleaseExecutor:
         approval_actor: str | None,
         approval_reason: str | None,
     ) -> None:
-        stored_approval = self.ledger.get_approval(run.run_id)
-        if (
-            stored_approval is not None
-            and stored_approval["candidate_digest"] == run.candidate_digest
-        ):
-            return
         if not execute_external:
             raise AuthorizationError("--execute-external is required")
         if confirm_sha != run.source.sha:
             raise AuthorizationError(
                 f"--confirm-sha must equal exact source SHA {run.source.sha}"
             )
+        stored_approval = self.ledger.get_approval(run.run_id)
+        if (
+            stored_approval is not None
+            and stored_approval["candidate_digest"] == run.candidate_digest
+        ):
+            return
         if not run.candidate_digest or approve_candidate != run.candidate_digest:
             raise AuthorizationError(
                 "--approve-candidate must equal the persisted release candidate digest"

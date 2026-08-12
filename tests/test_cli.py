@@ -342,6 +342,65 @@ def test_release_project_namespace_init_validate_show_is_offline_and_redacted(tm
         assert "PRIVATE KEY" not in result.stdout
 
 
+def test_release_project_init_derives_checkout_identity_and_renders_first_playbook(
+    git_repo, tmp_path
+):
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:acme/widget.git"],
+        cwd=git_repo,
+        check=True,
+    )
+    project_path = tmp_path / "release.toml"
+    initialized = run_cli(
+        [
+            "release",
+            "project",
+            "init",
+            str(project_path),
+            "--repo",
+            str(git_repo),
+            "--json",
+        ],
+        cwd=git_repo,
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    initialized_payload = json_data(initialized.stdout)
+    assert initialized_payload["derived_from_repository"] is True
+    project = load_release_project(project_path)
+    assert project.source_remote == "https://github.com/acme/widget.git"
+    assert project.github is not None
+    assert (project.github.owner, project.github.repo) == ("acme", "widget")
+
+    output = tmp_path / "github-candidate.toml"
+    rendered = run_cli(
+        [
+            "release",
+            "playbook",
+            "--project",
+            str(project_path),
+            "--source-sha",
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=git_repo,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip(),
+            "--phase",
+            "github-candidate",
+            "--repo",
+            str(git_repo),
+            "--output",
+            str(output),
+            "--json",
+        ],
+        cwd=git_repo,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    assert json_data(rendered.stdout)["phase"] == "github-candidate"
+    assert output.is_file()
+
+
 def test_release_observation_namespace_lists_and_shows_without_network(tmp_path):
     project_path = _release_project(tmp_path / "shipyard.release.toml")
     project = load_release_project(project_path)
@@ -500,6 +559,30 @@ def test_release_dossier_cli_exports_and_offline_verifies(tmp_path):
     assert json_data(exported.stdout)["valid"] is True
     assert verified.returncode == 0, verified.stderr
     assert json_data(verified.stdout)["runs_verified"] == 1
+
+
+def test_invalid_dossier_json_sets_ok_false_and_preserves_report(tmp_path):
+    quickstart = run_quickstart(tmp_path / "quickstart")
+
+    result = run_cli(
+        [
+            "release",
+            "dossier",
+            "verify",
+            str(quickstart.evidence_path),
+            "--json",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    envelope = json.loads(result.stdout)
+    assert envelope["api_version"] == "shipyard.cli/v1"
+    assert envelope["ok"] is False
+    assert envelope["status"] == "invalid"
+    assert envelope["data"]["valid"] is False
+    assert envelope["data"]["errors"]
 
 
 def test_wait_cli_uses_readback_once_without_resolve(monkeypatch, tmp_path, capsys):

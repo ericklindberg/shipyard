@@ -27,6 +27,10 @@ Successful results, including nonzero operational states such as a blocked check
 
 `data` is command-specific. The additive top-level `status` mirrors `data.status`, `data.state`, `data.verdict`, or a deterministic fallback and avoids command-specific envelope traversal. Process exit status remains authoritative for automation; `ok` means Shipyard produced a valid command result, not that a deployment occurred or a provider adopted it.
 
+Verification commands are stricter: a parsed but invalid evidence or dossier verdict uses
+`ok: false`, `status: invalid`, preserves the complete verifier report in `data`, and exits
+nonzero.
+
 ## Error envelope
 
 Handled Shipyard errors are written to standard error:

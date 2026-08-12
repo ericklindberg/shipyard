@@ -98,10 +98,18 @@ Shipyard does not yet authenticate a separate candidate-preparer principal. Do n
 Start from the stable release-project workflow in [Standalone release lifecycle](STANDALONE_RELEASE.md). Shipyard 0.6.0 discovers the watched SCM repository and exact candidate ref, adopts automatic exact-SHA Xcode Cloud runs, resolves app/build/version/group identities, and renders observation-bound mutation playbooks without copied opaque Apple IDs.
 
 ```bash
-shipyard release project init .shipyard/release.toml --json
+shipyard release project init .shipyard/release.toml --repo . --json
+shipyard release project validate .shipyard/release.toml --json
 shipyard release inspect . --project .shipyard/release.toml --allow-network --json
 shipyard release dossier verify /private/evidence/release-dossier.tar --json
 ```
+
+Project initialization is offline and derives the checkout's source remote plus GitHub
+owner/repository when available. Its JSON result lists the stable provider IDs and
+credential-reference names that still require editing. `project validate` and `project
+show` remain credential-free. `release inspect` is the separate provider path: configure
+those remaining coordinates and environment references first, then provide explicit
+`--allow-network` consent.
 
 ### Xcode Cloud
 

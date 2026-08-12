@@ -33,13 +33,21 @@ All notable changes to Shipyard will be documented in this file. The format foll
 - Playbook loading now rejects unsupported provider/action/options before creating a
   run, including annotated candidate tags on Buzz while preserving its compatible
   provider alias.
+- Release-project initialization derives the local checkout's canonical source remote
+  and GitHub owner/repository offline, and reports only the remaining provider IDs that
+  need operator configuration before inspection.
 - The JSON CLI envelope exposes stable top-level status and structured error code,
   phase, retryability, and mutation fields without removing the v1 `data` shape.
+- Invalid dossier verification now emits `ok: false`, `status: invalid`, retains the
+  detailed verifier report in `data`, and exits nonzero.
 - Runtime SBOMs inventory the complete hash-locked installed dependency closure,
   including `cryptography`, instead of a dependency-free wheel environment.
 
 ### Security
 
+- Persisted approvals no longer replace per-invocation external-mutation consent: every
+  resume still requires `--execute-external` and the exact `--confirm-sha` before a
+  provider attempt can start.
 - Portable dossier verification reparses the mandatory hash-bound release project and
   recomputes scope-required gates, preventing a rebuilt dossier from omitting policy.
 - External TestFlight retains no-follow evidence descriptors across the provider POST,

@@ -92,6 +92,44 @@ def _snapshot_payload(snapshot: RepositorySnapshot) -> dict[str, Any]:
     }
 
 
+def _release_project_template_from_repo(
+    repo: str | Path,
+) -> tuple[str, bool, list[str], str | None]:
+    remaining = [
+        "github.repository_id",
+        "github.required_workflow_ids",
+        "apple.workflow_id",
+        "apple.bundle_id",
+        "apple.expected_marketing_version",
+    ]
+    try:
+        snapshot = snapshot_repository(repo)
+    except GitError:
+        return render_project_template(), False, remaining, None
+    identity = canonical_repository_identity(snapshot.remote_url)
+    if identity is None:
+        return render_project_template(), False, remaining, str(snapshot.path)
+    parts = identity.split("/")
+    source_remote = f"https://{identity}.git"
+    owner = "example"
+    repository = "example"
+    name = "shipyard-release"
+    if len(parts) == 3 and parts[0] == "github.com":
+        owner, repository = parts[1], parts[2]
+        name = f"{repository[:247]}-release"
+    return (
+        render_project_template(
+            name=name,
+            source_remote=source_remote,
+            github_owner=owner,
+            github_repo=repository,
+        ),
+        True,
+        remaining,
+        str(snapshot.path),
+    )
+
+
 def _run_payload(run: ReleaseRun, ledger: Ledger | None = None) -> dict[str, Any]:
     payload = {
         "run_id": run.run_id,
@@ -153,10 +191,10 @@ def _payload_status(payload: Any) -> str:
     return "succeeded"
 
 
-def _json_envelope(payload: Any) -> dict[str, Any]:
+def _json_envelope(payload: Any, *, ok: bool = True) -> dict[str, Any]:
     return {
         "api_version": _JSON_API_VERSION,
-        "ok": True,
+        "ok": ok,
         "status": _payload_status(payload),
         "data": payload,
     }
@@ -205,9 +243,9 @@ class ShipyardArgumentParser(argparse.ArgumentParser):
         raise CliArgumentError(message)
 
 
-def _print(payload: Any, *, as_json: bool) -> None:
+def _print(payload: Any, *, as_json: bool, ok: bool = True) -> None:
     if as_json:
-        print(json.dumps(_json_envelope(payload), indent=2, sort_keys=True))
+        print(json.dumps(_json_envelope(payload, ok=ok), indent=2, sort_keys=True))
         return
     if isinstance(payload, dict) and "run_id" in payload:
         print(f"Run: {payload['run_id']}")
@@ -751,6 +789,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "init", help="Create a stable non-secret release project manifest"
     )
     release_init.add_argument("--output", default="shipyard.release.toml")
+    release_init.add_argument("--repo", default=".")
     release_init.add_argument("--force", action="store_true")
     release_init.add_argument("--json", action="store_true")
 
@@ -766,6 +805,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "init", help="Create a non-secret release project without network access"
     )
     project_init.add_argument("path", nargs="?", default="shipyard.release.toml")
+    project_init.add_argument("--repo", default=".")
     project_init.add_argument("--force", action="store_true")
     project_init.add_argument("--json", action="store_true")
     project_validate = release_project_subparsers.add_parser(
@@ -1245,9 +1285,12 @@ def main(argv: list[str] | None = None) -> int:
                 operation == "init" or args.release_project_command == "init"
             ):
                 output = args.output if operation == "init" else args.path
+                template, derived, remaining_edits, inspected_repo = (
+                    _release_project_template_from_repo(args.repo)
+                )
                 destination = _write_private_text(
                     output,
-                    render_project_template(),
+                    template,
                     force=args.force,
                 )
                 destination.chmod(0o644)
@@ -1258,11 +1301,15 @@ def main(argv: list[str] | None = None) -> int:
                         "schema_version": "shipyard.release-project/v1",
                         "secrets_stored": False,
                         "provider_mutations": 0,
+                        "derived_from_repository": derived,
+                        "inspected_repository": inspected_repo,
+                        "remaining_edits": remaining_edits,
                         "next_steps": [
-                            f"edit {destination}",
+                            f"edit remaining provider IDs in {destination}",
                             f"shipyard release project validate {destination} --json",
                             (
-                                f"shipyard release inspect --project {destination} "
+                                f"shipyard release inspect {args.repo} "
+                                f"--project {destination} "
                                 "--allow-network --json"
                             ),
                         ],
@@ -1330,8 +1377,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if operation == "dossier" and args.release_dossier_command == "verify":
                 report = verify_release_dossier(args.bundle)
-                _print(report, as_json=args.json)
-                return 0 if report.get("valid") is True else 1
+                valid = report.get("valid") is True
+                _print(report, as_json=args.json, ok=valid)
+                return 0 if valid else 1
             if operation == "gate" and args.release_gate_command == "show":
                 gate = GateStore(args.state_dir).load(args.attestation)
                 _print(gate.payload(), as_json=args.json)

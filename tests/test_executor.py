@@ -154,6 +154,43 @@ def test_resume_requires_both_external_flag_and_exact_sha(git_repo, tmp_path):
     assert (git_repo / "released.txt").read_text() == "released"
 
 
+def test_persisted_approval_still_requires_per_invocation_external_consent_and_sha(
+    git_repo, tmp_path
+):
+    ledger = Ledger(tmp_path / "state")
+    executor = ReleaseExecutor(ledger)
+    prepared = executor.start(git_repo, load_playbook(make_playbook(tmp_path)))
+    assert prepared.candidate_digest
+    ledger.record_approval(
+        prepared.run_id,
+        prepared.candidate_digest,
+        actor="pytest",
+        reason="persist approval without granting future mutation consent",
+    )
+
+    with pytest.raises(AuthorizationError, match="execute-external"):
+        executor.resume(prepared.run_id, confirm_sha=prepared.source_sha)
+    assert not (git_repo / "released.txt").exists()
+    assert ledger.get_run(prepared.run_id).steps[-1].attempts == 0
+
+    with pytest.raises(AuthorizationError, match="exact source SHA"):
+        executor.resume(
+            prepared.run_id,
+            execute_external=True,
+            confirm_sha="0" * 40,
+        )
+    assert not (git_repo / "released.txt").exists()
+    assert ledger.get_run(prepared.run_id).steps[-1].attempts == 0
+
+    completed = executor.resume(
+        prepared.run_id,
+        execute_external=True,
+        confirm_sha=prepared.source_sha,
+    )
+    assert completed.status == "succeeded"
+    assert (git_repo / "released.txt").read_text() == "released"
+
+
 def test_resume_refuses_when_head_changes(git_repo, tmp_path):
     ledger = Ledger(tmp_path / "state")
     executor = ReleaseExecutor(ledger)

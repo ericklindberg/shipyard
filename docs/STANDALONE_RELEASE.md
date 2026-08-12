@@ -17,8 +17,9 @@ The repository release gate installs that same canonical wheel plus its hash-loc
 ## 2. Create one non-secret release project
 
 ```bash
-shipyard release project init .shipyard/release.toml --json
-# Edit stable provider coordinates and environment-variable names.
+shipyard release project init .shipyard/release.toml --repo . --json
+# The source remote and GitHub owner/repository are derived locally.
+# Edit only the reported remaining provider IDs and environment-variable names.
 shipyard release project validate .shipyard/release.toml --json
 shipyard release project show .shipyard/release.toml --json
 ```

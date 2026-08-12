@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import stat
@@ -388,10 +389,34 @@ def validate_source_sha(value: str) -> str:
     return normalized
 
 
-def render_project_template() -> str:
-    return '''schema_version = 1
-name = "example-ios-release"
-source_remote = "https://github.com/example/example.git"
+def render_project_template(
+    *,
+    name: str = "example-ios-release",
+    source_remote: str = "https://github.com/example/example.git",
+    github_owner: str = "example",
+    github_repo: str = "example",
+) -> str:
+    for label, value in (
+        ("name", name),
+        ("source_remote", source_remote),
+        ("github_owner", github_owner),
+        ("github_repo", github_repo),
+    ):
+        if not isinstance(value, str) or not value or any(
+            character in value for character in ("\x00", "\r", "\n")
+        ):
+            raise ReleaseProjectError(f"release project template {label} is invalid")
+    if canonical_repository_identity(source_remote) is None:
+        raise ReleaseProjectError("release project template source remote is invalid")
+    if (
+        _IDENTIFIER.fullmatch(name) is None
+        or _REPOSITORY_PART.fullmatch(github_owner) is None
+        or _REPOSITORY_PART.fullmatch(github_repo) is None
+    ):
+        raise ReleaseProjectError("release project template identity is invalid")
+    return f'''schema_version = 1
+name = {json.dumps(name)}
+source_remote = {json.dumps(source_remote)}
 
 [git]
 github_remote = "origin"
@@ -399,15 +424,15 @@ buzz_remote = "buzz"
 main_ref = "refs/heads/main"
 
 [github]
-owner = "example"
-repo = "example"
+owner = {json.dumps(github_owner)}
+repo = {json.dumps(github_repo)}
 repository_id = "123456789"
 required_workflow_ids = ["111111", "222222"]
 token_env = "GITHUB_ACTIONS_TOKEN"
 
 [apple]
 workflow_id = "change-me"
-source_remote = "https://github.com/example/example.git"
+source_remote = {json.dumps(source_remote)}
 source_git_remote = "origin"
 bundle_id = "com.example.app"
 beta_group_name = "Testing"
