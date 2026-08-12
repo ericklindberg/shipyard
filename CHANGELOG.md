@@ -42,6 +42,9 @@ This section describes version 0.6.0. The [latest GitHub release](https://github
   detailed verifier report in `data`, and exits nonzero.
 - Runtime SBOMs inventory the complete hash-locked installed dependency closure,
   including `cryptography`, instead of a dependency-free wheel environment.
+- Dogfood and release-evidence workflows now consume exactly the two inputs emitted by
+  the typed `github.workflow` adapter, derive the immutable candidate tag from the
+  approved SHA and dispatch ref, and verify ref, checkout, and peeled-commit identity.
 
 ### Security
 

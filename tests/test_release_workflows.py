@@ -108,7 +108,6 @@ def test_shipyard_dogfood_workflow_runs_the_complete_exact_sha_gate():
     for required in (
         "workflow_dispatch:",
         "shipyard_candidate_sha:",
-        "shipyard_candidate_tag:",
         "shipyard_run_id:",
         "uv sync --extra dev --locked",
         "uv run pytest -q",
@@ -131,9 +130,11 @@ def test_shipyard_dogfood_workflow_runs_the_complete_exact_sha_gate():
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     ):
         assert required in workflow
+    assert "\n      shipyard_candidate_tag:" not in workflow
     assert "0.3.0" not in workflow
-    assert "ref: ${{ inputs.shipyard_candidate_tag }}" in workflow
-    assert 'test "$EXPECTED_TAG" = "shipyard-candidate-$EXPECTED_SHA"' in workflow
+    assert "ref: ${{ github.ref }}" in workflow
+    assert 'EXPECTED_TAG="shipyard-candidate-$EXPECTED_SHA"' in workflow
+    assert 'test "$GITHUB_REF" = "refs/tags/$EXPECTED_TAG"' in workflow
     assert (
         'test "$(git rev-parse "refs/tags/$EXPECTED_TAG^{commit}")" = "$EXPECTED_SHA"'
         in workflow
@@ -202,7 +203,11 @@ def test_release_evidence_workflow_attests_without_publishing():
     workflow = workflow_path.read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow
-    assert "candidate_tag:" in workflow
+    assert "\n      shipyard_candidate_sha:" in workflow
+    assert "\n      shipyard_run_id:" in workflow
+    assert "\n      shipyard_candidate_tag:" not in workflow
+    assert "\n      candidate_sha:" not in workflow
+    assert "\n      candidate_tag:" not in workflow
     assert "id-token: write" in workflow
     assert "attestations: write" in workflow
     assert "actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661" in workflow
@@ -219,8 +224,9 @@ def test_release_evidence_workflow_attests_without_publishing():
     assert "scripts/resolve_release_artifacts.py" in workflow
     assert "SHIPYARD_RUNTIME_SBOM" in workflow
     assert "SHIPYARD_BUILD_SBOM" in workflow
-    assert "ref: ${{ inputs.candidate_tag }}" in workflow
-    assert 'test "$EXPECTED_TAG" = "shipyard-candidate-$EXPECTED_SHA"' in workflow
+    assert "ref: ${{ github.ref }}" in workflow
+    assert 'EXPECTED_TAG="shipyard-candidate-$EXPECTED_SHA"' in workflow
+    assert 'test "$GITHUB_REF" = "refs/tags/$EXPECTED_TAG"' in workflow
     assert (
         'test "$(git rev-parse "refs/tags/$EXPECTED_TAG^{commit}")" = "$EXPECTED_SHA"'
         in workflow

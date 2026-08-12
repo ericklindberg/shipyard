@@ -1,14 +1,15 @@
 name: Release evidence
+run-name: "Shipyard evidence ${{ inputs.shipyard_run_id }} @ ${{ inputs.shipyard_candidate_sha }}"
 
 on:
   workflow_dispatch:
     inputs:
-      candidate_sha:
-        description: Full 40-character candidate commit SHA
+      shipyard_candidate_sha:
+        description: Full 40-character candidate commit SHA approved by Shipyard
         required: true
         type: string
-      candidate_tag:
-        description: Immutable Shipyard candidate tag bound to candidate_sha
+      shipyard_run_id:
+        description: Correlation ID from the local Shipyard ledger
         required: true
         type: string
 
@@ -23,16 +24,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.candidate_tag }}
+          ref: ${{ github.ref }}
       - name: Verify exact candidate
         env:
-          EXPECTED_SHA: ${{ inputs.candidate_sha }}
-          EXPECTED_TAG: ${{ inputs.candidate_tag }}
+          EXPECTED_SHA: ${{ inputs.shipyard_candidate_sha }}
         run: |
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
-          test "$EXPECTED_TAG" = "shipyard-candidate-$EXPECTED_SHA"
+          EXPECTED_TAG="shipyard-candidate-$EXPECTED_SHA"
+          test "$GITHUB_REF" = "refs/tags/$EXPECTED_TAG"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test "$(git rev-parse "refs/tags/$EXPECTED_TAG^{commit}")" = "$EXPECTED_SHA"
+          test "$GITHUB_SHA" = "$EXPECTED_SHA"
           test -z "$(git status --porcelain --untracked-files=all)"
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
@@ -62,7 +64,7 @@ jobs:
           .installed-smoke/bin/python scripts/smoke_installed_release.py \
             --shipyard .installed-smoke/bin/shipyard \
             --expected-version "$SHIPYARD_VERSION" \
-            --expected-source-sha "${{ inputs.candidate_sha }}"
+            --expected-source-sha "${{ inputs.shipyard_candidate_sha }}"
           rm -rf .installed-smoke dist/runtime-requirements.txt
       - name: Generate reproducible runtime CycloneDX SBOM
         run: |
@@ -88,7 +90,7 @@ jobs:
             dist/SHA256SUMS
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: shipyard-attested-${{ inputs.candidate_sha }}
+          name: shipyard-attested-${{ inputs.shipyard_candidate_sha }}
           path: dist/
           if-no-files-found: error
           retention-days: 30
