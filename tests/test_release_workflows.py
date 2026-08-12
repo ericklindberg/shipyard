@@ -127,18 +127,17 @@ def test_shipyard_dogfood_workflow_runs_the_complete_exact_sha_gate():
         "SHIPYARD_RUNTIME_SBOM",
         "SHIPYARD_BUILD_SBOM",
         "scripts/write_checksums.py",
+        "scripts/verify_candidate_tag.py",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     ):
         assert required in workflow
     assert "\n      shipyard_candidate_tag:" not in workflow
     assert "0.3.0" not in workflow
     assert "ref: ${{ github.ref }}" in workflow
-    assert 'EXPECTED_TAG="shipyard-candidate-$EXPECTED_SHA"' in workflow
-    assert 'test "$GITHUB_REF" = "refs/tags/$EXPECTED_TAG"' in workflow
-    assert (
-        'test "$(git rev-parse "refs/tags/$EXPECTED_TAG^{commit}")" = "$EXPECTED_SHA"'
-        in workflow
-    )
+    assert "--expected-sha \"$EXPECTED_SHA\"" in workflow
+    assert "--github-ref \"$GITHUB_REF\"" in workflow
+    assert "--github-sha \"$GITHUB_SHA\"" in workflow
+    assert "cat-file -t" not in workflow
     assert "deploy" not in workflow.casefold()
     assert "publish" not in workflow.casefold()
 
@@ -154,6 +153,16 @@ def test_build_isolation_dependencies_are_exactly_pinned():
     assert '[tool.setuptools.dynamic]' in pyproject
     assert 'version = { attr = "shipyard.__version__" }' in pyproject
     assert '\nversion = "0.3.0"' not in pyproject
+
+
+def test_releasing_guide_documents_strict_archive_and_annotated_tag_contracts():
+    guide = (ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+
+    assert "non-ZIP64 ZIP32" in guide
+    assert "scripts/verify_candidate_tag.py" in guide
+    assert "annotated candidate tag object" in guide
+    assert "shipyard_candidate_sha" in guide
+    assert "shipyard_run_id" in guide
 
 
 def test_source_distribution_manifest_includes_operator_and_contributor_material():
@@ -224,13 +233,12 @@ def test_release_evidence_workflow_attests_without_publishing():
     assert "scripts/resolve_release_artifacts.py" in workflow
     assert "SHIPYARD_RUNTIME_SBOM" in workflow
     assert "SHIPYARD_BUILD_SBOM" in workflow
+    assert "scripts/verify_candidate_tag.py" in workflow
     assert "ref: ${{ github.ref }}" in workflow
-    assert 'EXPECTED_TAG="shipyard-candidate-$EXPECTED_SHA"' in workflow
-    assert 'test "$GITHUB_REF" = "refs/tags/$EXPECTED_TAG"' in workflow
-    assert (
-        'test "$(git rev-parse "refs/tags/$EXPECTED_TAG^{commit}")" = "$EXPECTED_SHA"'
-        in workflow
-    )
+    assert "--expected-sha \"$EXPECTED_SHA\"" in workflow
+    assert "--github-ref \"$GITHUB_REF\"" in workflow
+    assert "--github-sha \"$GITHUB_SHA\"" in workflow
+    assert "cat-file -t" not in workflow
     assert "0.3.0" not in workflow
     assert "twine upload" not in workflow
     assert "uv publish" not in workflow

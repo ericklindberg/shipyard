@@ -6,10 +6,13 @@ import gzip
 import os
 import re
 import shutil
+import stat
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
+import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
@@ -17,6 +20,9 @@ from pathlib import Path, PurePosixPath
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _MAX_MEMBERS = 10_000
 _MAX_MEMBER_BYTES = 128 * 1024 * 1024
+_END_OF_CENTRAL_DIRECTORY = b"PK\x05\x06"
+_CENTRAL_DIRECTORY_ENTRY = b"PK\x01\x02"
+_LOCAL_FILE_HEADER = b"PK\x03\x04"
 
 
 class ReleaseBuildError(RuntimeError):
@@ -125,6 +131,11 @@ def normalize_sdist(source: Path, destination: Path, epoch: int) -> None:
                     record.gname = ""
                     record.mtime = epoch
                     record.pax_headers = {}
+                    record.mode = (
+                        0o755
+                        if record.isdir() or (record.isfile() and record.mode & 0o111)
+                        else 0o644
+                    )
                     payload = archive.extractfile(member) if member.isfile() else None
                     output.addfile(record, payload)
         except (OSError, tarfile.TarError) as exc:
@@ -151,6 +162,163 @@ def normalize_sdist(source: Path, destination: Path, epoch: int) -> None:
             os.replace(temporary, destination)
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def normalize_wheel(source: Path, destination: Path) -> None:
+    """Canonicalize ZIP host/mode metadata without recompressing wheel members."""
+    if source.is_symlink() or not source.is_file():
+        raise ReleaseBuildError("wheel must be a regular non-symlink file")
+    try:
+        payload = bytearray(source.read_bytes())
+    except OSError as exc:
+        raise ReleaseBuildError("cannot read wheel") from exc
+    search_start = max(0, len(payload) - (65_535 + 22))
+    end = payload.rfind(_END_OF_CENTRAL_DIRECTORY, search_start)
+    if end < 0 or end + 22 > len(payload):
+        raise ReleaseBuildError("wheel has no valid end-of-central-directory record")
+    disk, central_disk, disk_entries, total_entries = struct.unpack_from(
+        "<HHHH", payload, end + 4
+    )
+    central_size, central_offset = struct.unpack_from("<II", payload, end + 12)
+    comment_length = struct.unpack_from("<H", payload, end + 20)[0]
+    if total_entries == 0xFFFF or central_size == 0xFFFFFFFF or central_offset == 0xFFFFFFFF:
+        raise ReleaseBuildError("wheel must use the documented non-ZIP64 ZIP32 format")
+    if (
+        disk != 0
+        or central_disk != 0
+        or disk_entries != total_entries
+        or total_entries == 0
+        or total_entries > _MAX_MEMBERS
+        or end + 22 + comment_length != len(payload)
+        or central_offset + central_size != end
+    ):
+        raise ReleaseBuildError("wheel central directory is unsupported or malformed")
+    position = central_offset
+    seen: set[bytes] = set()
+    local_records: list[tuple[int, int]] = []
+    for _index in range(total_entries):
+        if position + 46 > end or payload[position : position + 4] != _CENTRAL_DIRECTORY_ENTRY:
+            raise ReleaseBuildError("wheel central directory entry is malformed")
+        name_length, extra_length, member_comment_length = struct.unpack_from(
+            "<HHH", payload, position + 28
+        )
+        next_position = position + 46 + name_length + extra_length + member_comment_length
+        if name_length == 0 or next_position > end:
+            raise ReleaseBuildError("wheel central directory entry is malformed")
+        name = bytes(payload[position + 46 : position + 46 + name_length])
+        try:
+            path = PurePosixPath(name.decode("utf-8", errors="strict"))
+        except UnicodeDecodeError as exc:
+            raise ReleaseBuildError("wheel member name is not valid UTF-8") from exc
+        if (
+            name in seen
+            or path.is_absolute()
+            or not path.parts
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ReleaseBuildError("wheel contains an unsafe or duplicate member path")
+        seen.add(name)
+        made_by = struct.unpack_from("<H", payload, position + 4)[0]
+        if made_by >> 8 != 3:
+            raise ReleaseBuildError("wheel members must use Unix member metadata")
+        flags, compression = struct.unpack_from("<HH", payload, position + 8)
+        crc, compressed_size, uncompressed_size = struct.unpack_from(
+            "<III", payload, position + 16
+        )
+        if flags not in {0, 0x0800}:
+            raise ReleaseBuildError("wheel general-purpose flags are unsupported")
+        if compression not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+            raise ReleaseBuildError("wheel compression method is unsupported")
+        if compressed_size == 0xFFFFFFFF or uncompressed_size == 0xFFFFFFFF:
+            raise ReleaseBuildError("wheel must use the documented non-ZIP64 ZIP32 format")
+        local_offset = struct.unpack_from("<I", payload, position + 42)[0]
+        if local_offset == 0xFFFFFFFF:
+            raise ReleaseBuildError("wheel must use the documented non-ZIP64 ZIP32 format")
+        if flags & 0x08:
+            raise ReleaseBuildError("wheel data descriptors are unsupported")
+        local_header_missing = (
+            local_offset + 30 > central_offset
+            or payload[local_offset : local_offset + 4] != _LOCAL_FILE_HEADER
+        )
+        if local_header_missing:
+            raise ReleaseBuildError("wheel local header offset is invalid")
+        local_flags, local_compression = struct.unpack_from("<HH", payload, local_offset + 6)
+        local_crc, local_compressed_size, local_uncompressed_size = struct.unpack_from(
+            "<III", payload, local_offset + 14
+        )
+        local_name_length, local_extra_length = struct.unpack_from(
+            "<HH", payload, local_offset + 26
+        )
+        local_data_offset = local_offset + 30 + local_name_length + local_extra_length
+        local_record_end = local_data_offset + compressed_size
+        if local_record_end > central_offset:
+            raise ReleaseBuildError("wheel local member data overlaps the central directory")
+        local_records.append((local_offset, local_record_end))
+        local_name = bytes(
+            payload[local_offset + 30 : local_offset + 30 + local_name_length]
+        )
+        if local_name != name:
+            raise ReleaseBuildError("wheel local and central member names differ")
+        if local_flags != flags:
+            raise ReleaseBuildError("wheel local and central flags differ")
+        if local_compression != compression:
+            raise ReleaseBuildError("wheel local and central compression method differs")
+        if (local_crc, local_compressed_size, local_uncompressed_size) != (
+            crc,
+            compressed_size,
+            uncompressed_size,
+        ):
+            raise ReleaseBuildError("wheel local and central CRC or size differs")
+        original_attributes = struct.unpack_from("<I", payload, position + 38)[0]
+        unix_mode = original_attributes >> 16
+        original_type = stat.S_IFMT(unix_mode)
+        original_mode = stat.S_IMODE(unix_mode)
+        is_directory = name.endswith(b"/")
+        if original_type not in {stat.S_IFREG, stat.S_IFDIR}:
+            raise ReleaseBuildError("wheel supports only regular files and directories")
+        if is_directory != (original_type == stat.S_IFDIR):
+            raise ReleaseBuildError("wheel member type does not match its path")
+        struct.pack_into("<H", payload, position + 4, (3 << 8) | (made_by & 0xFF))
+        canonical_permissions = 0o755 if is_directory or original_mode & 0o111 else 0o644
+        canonical_type = stat.S_IFDIR if is_directory else stat.S_IFREG
+        external_attributes = ((canonical_type | canonical_permissions) << 16) | (
+            0x10 if is_directory else 0
+        )
+        struct.pack_into("<I", payload, position + 38, external_attributes)
+        position = next_position
+    if position != end:
+        raise ReleaseBuildError("wheel central directory size is inconsistent")
+    ordered_records = sorted(local_records)
+    if (
+        ordered_records[0][0] != 0
+        or ordered_records[-1][1] != central_offset
+        or any(
+            previous_end != next_start
+            for (_, previous_end), (next_start, _) in zip(
+                ordered_records, ordered_records[1:], strict=False
+            )
+        )
+    ):
+        raise ReleaseBuildError("wheel local records must be contiguous and non-overlapping")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    try:
+        with temporary.open("xb") as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o644)
+        try:
+            with zipfile.ZipFile(temporary) as archive:
+                if archive.testzip() is not None:
+                    raise ReleaseBuildError("normalized wheel member CRC is invalid")
+        except (zipfile.BadZipFile, NotImplementedError, RuntimeError) as exc:
+            raise ReleaseBuildError("normalized wheel is invalid") from exc
+        os.replace(temporary, destination)
+    except (OSError, UnicodeError, struct.error) as exc:
+        raise ReleaseBuildError("cannot normalize wheel metadata") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def build(root: Path, destination: Path) -> dict[str, str | int]:
@@ -200,8 +368,7 @@ def build(root: Path, destination: Path) -> dict[str, str | int]:
                 staging = Path(staging_name)
                 staged_wheel = staging / wheels[0].name
                 staged_sdist = staging / sdists[0].name
-                shutil.copyfile(wheels[0], staged_wheel)
-                os.chmod(staged_wheel, 0o644)
+                normalize_wheel(wheels[0], staged_wheel)
                 normalize_sdist(sdists[0], staged_sdist, epoch)
                 for path in (staged_wheel, staged_sdist):
                     with path.open("rb") as artifact:

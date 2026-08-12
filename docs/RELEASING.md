@@ -8,7 +8,11 @@ Shipyard releases are exact-SHA evidence exercises. CI never deploys providers o
 2. Run Ruff, ty, selected Bandit, the complete test suite, and
    `python scripts/build_release_artifacts.py --directory dist` from a clean
    exact-SHA worktree. The builder derives `SOURCE_DATE_EPOCH` from the commit
-   and normalizes sdist tar/gzip metadata for reproducible artifacts.
+   and normalizes archive metadata for reproducible artifacts. Wheel normalization
+   intentionally accepts only non-ZIP64 ZIP32 archives with Unix metadata, plain
+   stored/deflated members, regular-file/directory types, and matching contiguous
+   local/central records. It rejects ambiguous or special-file archive semantics
+   instead of rewriting them.
 3. Run `python scripts/scan_tracked_secrets.py --root .`.
 4. Export the locked development dependency set and audit it:
 
@@ -42,7 +46,12 @@ Do not develop directly on the GitHub mirror or treat a GitHub-only commit as de
 
 ## Attested evidence
 
-The `Release evidence` workflow is manual and requires a full 40-character `candidate_sha`. It:
+The `Release evidence` workflow is manual and consumes the two fields emitted by
+Shipyard's typed GitHub workflow adapter: `shipyard_candidate_sha` and
+`shipyard_run_id`. Before any build step, `scripts/verify_candidate_tag.py` proves
+that the dispatch ref resolves to an annotated candidate tag object named
+`shipyard-candidate-<SHA>` that directly references the approved commit. It rejects
+lightweight and nested tags. The workflow then:
 
 - checks out and independently verifies that exact SHA;
 - reruns formatting, typing, security, test, dependency, secret, and build gates;

@@ -24,17 +24,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.ref }}
-      - name: Verify exact candidate source
+      - name: Verify exact annotated candidate tag
         env:
           EXPECTED_SHA: ${{ inputs.shipyard_candidate_sha }}
         run: |
-          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
-          EXPECTED_TAG="shipyard-candidate-$EXPECTED_SHA"
-          test "$GITHUB_REF" = "refs/tags/$EXPECTED_TAG"
-          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          test "$(git rev-parse "refs/tags/$EXPECTED_TAG^{commit}")" = "$EXPECTED_SHA"
-          test "$GITHUB_SHA" = "$EXPECTED_SHA"
-          test -z "$(git status --porcelain --untracked-files=all)"
+          python scripts/verify_candidate_tag.py \
+            --repository . \
+            --expected-sha "$EXPECTED_SHA" \
+            --github-ref "$GITHUB_REF" \
+            --github-sha "$GITHUB_SHA"
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true

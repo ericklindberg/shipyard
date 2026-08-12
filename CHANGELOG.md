@@ -45,6 +45,13 @@ This section describes version 0.6.0. The [latest GitHub release](https://github
 - Dogfood and release-evidence workflows now consume exactly the two inputs emitted by
   the typed `github.workflow` adapter, derive the immutable candidate tag from the
   approved SHA and dispatch ref, and verify ref, checkout, and peeled-commit identity.
+- Release builds canonicalize wheel ZIP host/mode metadata and source-archive member
+  modes to `0644` for ordinary files and `0755` for directories/executables, removing
+  checkout umask drift without recompressing wheel payloads.
+- Hosted evidence gates now reject lightweight/nested candidate tags and record the
+  exact annotated tag-object identity before building. Wheel normalization fails
+  closed on special or type-inconsistent members, ZIP64/unsupported features, and
+  mismatched, overlapping, gapped, or hidden local records.
 
 ### Security
 
