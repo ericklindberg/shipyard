@@ -37,6 +37,11 @@ the manifest was successfully assessed; configuration/schema errors use the erro
 envelope and exit `2`. Consumers must not interpret any preflight status as an Apple
 approval prediction, App Store Connect readback, or submission result.
 
+`app-review init --json` returns `status: created`, the output path, schema version,
+`secrets_stored: false`, `network_access: false`, `provider_mutations: 0`, and deterministic
+next steps. The generated file is an intentionally blocked local scaffold, not evidence
+about an app or an Apple-side resource.
+
 ## Error envelope
 
 Handled Shipyard errors are written to standard error:

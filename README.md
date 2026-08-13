@@ -81,8 +81,8 @@ Screen an iOS submission manifest for common, deterministic App Review rejection
 risks without credentials, network access, or App Store Connect mutation:
 
 ```bash
-cp examples/app-review-preflight.json ./app-review.json
-# Edit only non-secret submission facts; never put reviewer passwords or tokens here.
+shipyard app-review init --output ./app-review.json --json
+# Edit every non-secret submission fact; the untouched scaffold is deliberately blocked.
 shipyard app-review preflight ./app-review.json --json
 ```
 

@@ -58,6 +58,60 @@ class AppReviewPreflightError(ValueError):
     pass
 
 
+def app_review_manifest_template() -> dict[str, object]:
+    """Return a fresh, secret-free scaffold that remains blocked until reviewed."""
+    return {
+        "schema_version": _SCHEMA,
+        "app": {
+            "name": "REPLACE_WITH_APP_NAME",
+            "bundle_id": "com.example.replace",
+            "version": "0.0",
+            "build_number": "0",
+        },
+        "submission": {
+            "metadata_complete": False,
+            "screenshots_current": False,
+            "known_crashes": False,
+            "placeholder_content": False,
+            "broken_links": False,
+        },
+        "review_access": {
+            "requires_login": False,
+            "demo_account_available": False,
+            "review_notes_complete": False,
+            "requires_special_hardware": False,
+            "hardware_instructions_complete": False,
+        },
+        "privacy": {
+            "privacy_policy_url": "",
+            "support_url": "",
+            "data_collection_disclosed": False,
+            "privacy_manifest_present": False,
+            "account_creation": False,
+            "account_deletion_available": False,
+        },
+        "commerce": {
+            "digital_goods": False,
+            "uses_in_app_purchase": False,
+            "restore_purchases_available": False,
+        },
+        "authentication": {
+            "third_party_login": False,
+            "sign_in_with_apple_available": False,
+        },
+        "compliance": {
+            "uses_encryption": False,
+            "export_compliance_documented": False,
+            "user_generated_content": False,
+            "moderation_controls_available": False,
+        },
+    }
+
+
+def render_app_review_manifest_template() -> str:
+    return json.dumps(app_review_manifest_template(), indent=2, sort_keys=True) + "\n"
+
+
 def _reject_secret_keys(value: object) -> None:
     if isinstance(value, Mapping):
         for raw_key, child in value.items():

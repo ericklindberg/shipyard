@@ -14,7 +14,12 @@ from typing import Any, NoReturn
 
 from .adapters.base import AdapterError
 from .adapters.registry import AdapterRegistry
-from .app_review_preflight import AppReviewPreflightError, run_app_review_preflight
+from .app_review_preflight import (
+    AppReviewPreflightError,
+    app_review_manifest_template,
+    render_app_review_manifest_template,
+    run_app_review_preflight,
+)
 from .apple_release import (
     AppleReleaseCoordinates,
     render_testflight_playbook,
@@ -1304,23 +1309,27 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "app-review":
             if args.app_review_command == "init":
-                manifest = {
-                    "schema_version": "shipyard.app-review-preflight/v1",
-                    "app": {"name": "My App", "bundle_id": "com.example.myapp", "version": "1.0", "build_number": "1"},
-                    "submission": {"metadata_complete": False, "screenshots_current": False, "known_crashes": False, "placeholder_content": False, "broken_links": False},
-                    "review_access": {"requires_login": False, "demo_account_available": False, "review_notes_complete": False, "requires_special_hardware": False, "hardware_instructions_complete": False},
-                    "privacy": {"privacy_policy_url": "https://example.com/privacy", "support_url": "https://example.com/support", "data_collection_disclosed": False, "privacy_manifest_present": False, "account_creation": False, "account_deletion_available": False},
-                    "commerce": {"digital_goods": False, "uses_in_app_purchase": False, "restore_purchases_available": False},
-                    "authentication": {"third_party_login": False, "sign_in_with_apple_available": False},
-                    "compliance": {"uses_encryption": False, "export_compliance_documented": False, "user_generated_content": False, "moderation_controls_available": False},
-                }
+                manifest = app_review_manifest_template()
                 destination = _write_private_text(
                     args.output,
-                    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                    render_app_review_manifest_template(),
                     force=args.force,
                 )
-                destination.chmod(0o644)
-                _print({"created": str(destination), "schema_version": manifest["schema_version"], "status": "created"}, as_json=args.json)
+                _print(
+                    {
+                        "created": str(destination),
+                        "schema_version": manifest["schema_version"],
+                        "status": "created",
+                        "secrets_stored": False,
+                        "network_access": False,
+                        "provider_mutations": 0,
+                        "next_steps": [
+                            f"edit non-secret submission facts in {destination}",
+                            f"shipyard app-review preflight {destination} --json",
+                        ],
+                    },
+                    as_json=args.json,
+                )
                 return 0
             payload = run_app_review_preflight(args.manifest)
             _print(payload, as_json=args.json)

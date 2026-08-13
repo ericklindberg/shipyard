@@ -167,9 +167,14 @@ Shipyard can screen operator-supplied submission facts for common deterministic 
 before an App Store submission exists:
 
 ```bash
-cp examples/app-review-preflight.json ./app-review.json
+shipyard app-review init --output ./app-review.json --json
 shipyard app-review preflight ./app-review.json --json
 ```
+
+`app-review init` works from the installed package without repository example files. It
+creates a secret-free `0600` scaffold whose conservative defaults remain `blocked` until
+the operator explicitly reviews every submission fact. It refuses existing and symlink
+outputs unless an ordinary existing file is deliberately replaced with `--force`.
 
 The command is offline, read-only, deterministic, and rejects secret-bearing field
 names so reviewer passwords and tokens are not normalized into project artifacts.

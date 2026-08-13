@@ -30,6 +30,8 @@ This section describes version 0.6.0. The [latest GitHub release](https://github
 - Added `shipyard app-review preflight`, a deterministic offline advisory screen for
   common App Review rejection risks using a strict secret-free submission manifest,
   stable finding IDs, evidence, remediation, and explicit no-guarantee boundaries.
+- Added installed-package-safe `shipyard app-review init` scaffolding with conservative
+  blocked defaults, private file creation, and overwrite/symlink protections.
 
 ### Changed
 
