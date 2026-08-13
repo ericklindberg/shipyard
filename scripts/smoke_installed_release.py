@@ -18,7 +18,12 @@ class SmokeError(RuntimeError):
 _SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
-def _run(executable: Path, *arguments: str, cwd: Path | None = None) -> dict[str, object]:
+def _run(
+    executable: Path,
+    *arguments: str,
+    cwd: Path | None = None,
+    accepted_returncodes: tuple[int, ...] = (0,),
+) -> dict[str, object]:
     result = subprocess.run(
         [str(executable), *arguments, "--json"],
         cwd=cwd,
@@ -34,7 +39,7 @@ def _run(executable: Path, *arguments: str, cwd: Path | None = None) -> dict[str
         check=False,
         timeout=120,
     )
-    if result.returncode:
+    if result.returncode not in accepted_returncodes:
         raise SmokeError(
             f"installed command failed ({result.returncode}): "
             f"{result.stderr.strip() or result.stdout.strip()}"
@@ -115,6 +120,7 @@ def smoke(executable: Path, expected_version: str, expected_source_sha: str) -> 
             raise SmokeError("installed Shipyard source SHA does not match the built wheel")
 
         for command in (
+            ("app-review", "init"),
             ("release",),
             ("release", "project", "init"),
             ("release", "wait"),
@@ -126,6 +132,31 @@ def smoke(executable: Path, expected_version: str, expected_source_sha: str) -> 
             ("release", "dossier", "verify"),
         ):
             _run_help(executable, *command)
+
+        app_review_manifest = root / "app-review.json"
+        app_review = _run(
+            executable,
+            "app-review", "init", "--output", str(app_review_manifest),
+        )
+        if (
+            app_review.get("secrets_stored") is not False
+            or app_review.get("network_access") is not False
+            or app_review.get("provider_mutations") != 0
+        ):
+            raise SmokeError("installed App Review scaffold crossed its local-only boundary")
+        if stat.S_IMODE(app_review_manifest.stat().st_mode) != 0o600:
+            raise SmokeError("installed App Review scaffold is not private")
+        app_review_preflight = _run(
+            executable,
+            "app-review", "preflight", str(app_review_manifest),
+            accepted_returncodes=(1,),
+        )
+        if (
+            app_review_preflight.get("status") != "blocked"
+            or app_review_preflight.get("network_access") is not False
+            or app_review_preflight.get("provider_mutations") != 0
+        ):
+            raise SmokeError("installed App Review scaffold was not conservatively blocked")
 
         quickstart = _run(executable, "quickstart", str(root / "quickstart"))
         if (

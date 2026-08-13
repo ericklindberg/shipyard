@@ -77,8 +77,14 @@ def test_installed_smoke_uses_the_runtime_identity_package_version() -> None:
     assert 'version.get("source_sha") != expected_source_sha' in smoke
     assert "--expected-source-sha" in smoke
     assert "_run_help(executable, *command)" in smoke
+    assert '("app-review", "init")' in smoke
     assert '("release", "project", "init")' in smoke
     assert '("release", "dossier", "verify")' in smoke
+    assert '"app-review", "init", "--output"' in smoke
+    assert '"app-review", "preflight"' in smoke
+    assert 'app_review.get("network_access") is not False' in smoke
+    assert 'app_review.get("provider_mutations") != 0' in smoke
+    assert 'stat.S_IMODE(app_review_manifest.stat().st_mode) != 0o600' in smoke
     assert 'version.get("version")' not in smoke
     assert (
         'Path(tempfile.mkdtemp(prefix="shipyard-installed-smoke-")).resolve(strict=True)'

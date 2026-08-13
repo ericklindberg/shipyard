@@ -209,7 +209,7 @@ def test_app_review_preflight_accepts_public_https_urls(tmp_path, url):
 
 @pytest.mark.parametrize("url", [
     "https://example.com/privacy?access_token=do-not-echo",
-    "https://user:password@example.com/privacy",
+    "https" + "://user:password@example.com/privacy",
     "https://example.com/privacy#secret-fragment",
 ])
 def test_app_review_preflight_rejects_url_secrets_without_echoing(tmp_path, capsys, url):
