@@ -665,6 +665,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     app_review_preflight.add_argument("manifest")
     app_review_preflight.add_argument("--json", action="store_true")
+    app_review_preflight.add_argument(
+        "--warnings-as-errors", action="store_true",
+        help="return failure when advisory warnings are present (for CI)",
+    )
 
     bootstrap_parser = subparsers.add_parser(
         "bootstrap", help="Generate safe integration files without network access"
@@ -1295,7 +1299,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "app-review":
             payload = run_app_review_preflight(args.manifest)
             _print(payload, as_json=args.json)
-            return 1 if payload["status"] == "blocked" else 0
+            return 1 if payload["status"] == "blocked" or (
+                args.warnings_as_errors and payload["status"] == "review"
+            ) else 0
         if args.command == "release":
             operation = args.release_command
             if operation in {"init", "project"} and (

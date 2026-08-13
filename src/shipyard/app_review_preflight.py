@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import stat
@@ -160,9 +161,16 @@ def load_app_review_manifest(path: str | Path) -> dict[str, object]:
 
 def _valid_public_https_url(value: str) -> bool:
     parsed = urlsplit(value)
+    try:
+        hostname = parsed.hostname
+        address = ipaddress.ip_address(hostname) if hostname else None
+    except ValueError:
+        return False
     return (
         parsed.scheme == "https"
-        and bool(parsed.hostname)
+        and bool(hostname)
+        and (address is None or not (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_unspecified or address.is_multicast))
+        and (address is not None or "." in hostname and not hostname.endswith(".local"))
         and parsed.username is None
         and parsed.password is None
         and not parsed.fragment

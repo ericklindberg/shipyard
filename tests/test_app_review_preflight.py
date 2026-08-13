@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from shipyard.cli import main
 
 
@@ -164,3 +166,39 @@ def test_app_review_preflight_rejects_secret_fields(tmp_path, capsys):
     error = json.loads(captured.err)
     assert "credential values" in error["error"]["message"]
     assert "do-not-store-this" not in captured.err
+
+
+@pytest.mark.parametrize("url", [
+    "https://localhost/privacy",
+    "https://127.0.0.1/privacy",
+    "https://10.0.0.1/privacy",
+    "https://192.168.1.2/privacy",
+    "https://169.254.1.2/privacy",
+    "https://[::1]/privacy",
+    "https://app.local/privacy",
+])
+def test_app_review_preflight_rejects_non_public_urls(tmp_path, capsys, url):
+    manifest = _manifest(privacy={**_manifest()["privacy"], "privacy_policy_url": url})
+    path = tmp_path / "app-review.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    from shipyard.app_review_preflight import AppReviewPreflightError, load_app_review_manifest
+
+    with pytest.raises(AppReviewPreflightError, match="HTTPS URL"):
+        load_app_review_manifest(path)
+
+
+def test_app_review_preflight_can_fail_ci_on_warnings(tmp_path, capsys):
+    manifest = _manifest(compliance={
+        "uses_encryption": True,
+        "export_compliance_documented": False,
+        "user_generated_content": False,
+        "moderation_controls_available": False,
+    })
+    path = tmp_path / "app-review.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    code = main(["app-review", "preflight", str(path), "--json", "--warnings-as-errors"])
+    capsys.readouterr()
+
+    assert code == 1
