@@ -25,6 +25,18 @@ def test_init_generates_valid_typed_provider_playbooks(tmp_path):
         assert playbook.steps[0].action is not None
 
 
+def test_app_review_init_writes_parseable_conservative_manifest(tmp_path, capsys):
+    destination = tmp_path / "review.json"
+    assert main(["app-review", "init", "--output", str(destination), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["created"] == str(destination)
+    manifest = json.loads(destination.read_text())
+    assert manifest["schema_version"] == "shipyard.app-review-preflight/v1"
+    assert set(manifest) == {"schema_version", "app", "submission", "review_access", "privacy", "commerce", "authentication", "compliance"}
+    assert main(["app-review", "preflight", str(destination), "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["data"]["status"] == "blocked"
+
+
 def test_agent_facing_list_doctor_adapters_and_version_are_json(
     git_repo, tmp_path, capsys
 ):

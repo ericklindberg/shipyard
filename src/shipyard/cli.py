@@ -669,6 +669,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--warnings-as-errors", action="store_true",
         help="return failure when advisory warnings are present (for CI)",
     )
+    app_review_init = app_review_subparsers.add_parser(
+        "init", help="Create a conservative App Review manifest scaffold"
+    )
+    app_review_init.add_argument("--output", required=True)
+    app_review_init.add_argument("--force", action="store_true")
+    app_review_init.add_argument("--json", action="store_true")
 
     bootstrap_parser = subparsers.add_parser(
         "bootstrap", help="Generate safe integration files without network access"
@@ -1297,6 +1303,25 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "app-review":
+            if args.app_review_command == "init":
+                manifest = {
+                    "schema_version": "shipyard.app-review-preflight/v1",
+                    "app": {"name": "My App", "bundle_id": "com.example.myapp", "version": "1.0", "build_number": "1"},
+                    "submission": {"metadata_complete": False, "screenshots_current": False, "known_crashes": False, "placeholder_content": False, "broken_links": False},
+                    "review_access": {"requires_login": False, "demo_account_available": False, "review_notes_complete": False, "requires_special_hardware": False, "hardware_instructions_complete": False},
+                    "privacy": {"privacy_policy_url": "https://example.com/privacy", "support_url": "https://example.com/support", "data_collection_disclosed": False, "privacy_manifest_present": False, "account_creation": False, "account_deletion_available": False},
+                    "commerce": {"digital_goods": False, "uses_in_app_purchase": False, "restore_purchases_available": False},
+                    "authentication": {"third_party_login": False, "sign_in_with_apple_available": False},
+                    "compliance": {"uses_encryption": False, "export_compliance_documented": False, "user_generated_content": False, "moderation_controls_available": False},
+                }
+                destination = _write_private_text(
+                    args.output,
+                    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                    force=args.force,
+                )
+                destination.chmod(0o644)
+                _print({"created": str(destination), "schema_version": manifest["schema_version"], "status": "created"}, as_json=args.json)
+                return 0
             payload = run_app_review_preflight(args.manifest)
             _print(payload, as_json=args.json)
             return 1 if payload["status"] == "blocked" or (
