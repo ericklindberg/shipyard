@@ -6,8 +6,8 @@ from typing import cast
 
 import pytest
 
-from shipyard.cli import main
 from shipyard.app_review_preflight import AppReviewPreflightError, load_app_review_manifest
+from shipyard.cli import main
 
 
 def _manifest(**overrides: object) -> dict[str, object]:
@@ -178,6 +178,10 @@ def test_app_review_preflight_rejects_secret_fields(tmp_path, capsys):
     "https://169.254.1.2/privacy",
     "https://[::1]/privacy",
     "https://app.local/privacy",
+    "https://app.local./privacy",
+    "https://example..com/privacy",
+    "https://-example.com/privacy",
+    "https://example.com:/privacy",
 ])
 def test_app_review_preflight_rejects_non_public_urls(tmp_path, capsys, url):
     manifest = _manifest()
@@ -192,13 +196,15 @@ def test_app_review_preflight_rejects_non_public_urls(tmp_path, capsys, url):
 @pytest.mark.parametrize("url", [
     "https://example.com/privacy",
     "https://8.8.8.8/privacy",
+    "https://[2001:4860:4860::8888]/privacy",
 ])
 def test_app_review_preflight_accepts_public_https_urls(tmp_path, url):
     manifest = _manifest()
     cast(dict[str, object], manifest["privacy"])["privacy_policy_url"] = url
     path = tmp_path / "app-review.json"
     path.write_text(json.dumps(manifest), encoding="utf-8")
-    assert cast(dict[str, object], load_app_review_manifest(path)["privacy"])["privacy_policy_url"] == url
+    loaded_privacy = cast(dict[str, object], load_app_review_manifest(path)["privacy"])
+    assert loaded_privacy["privacy_policy_url"] == url
 
 
 @pytest.mark.parametrize("url", [

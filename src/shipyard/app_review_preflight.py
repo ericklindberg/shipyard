@@ -4,6 +4,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import stat
 from collections.abc import Mapping
 from pathlib import Path
@@ -208,7 +209,8 @@ def load_app_review_manifest(path: str | Path) -> dict[str, object]:
         url = str(privacy[field])
         if url and not _valid_public_https_url(url):
             raise AppReviewPreflightError(
-                f"app review manifest privacy.{field} must be an HTTPS URL without credentials"
+                f"app review manifest privacy.{field} must be a public HTTPS URL without "
+                "credentials, query, or fragment"
             )
     return value
 
@@ -219,29 +221,33 @@ def _valid_public_https_url(value: str) -> bool:
     try:
         parsed = urlsplit(value)
         hostname = parsed.hostname
-        port = parsed.port
+        _port = parsed.port
         username = parsed.username
         password = parsed.password
     except ValueError:
         return False
-    if parsed.scheme != "https" or not hostname or port is None and ":" in parsed.netloc:
+    if parsed.scheme != "https" or not hostname or parsed.netloc.endswith(":"):
         return False
     if username is not None or password is not None or parsed.query or parsed.fragment:
         return False
+    normalized_hostname = hostname.rstrip(".").lower()
     try:
-        address = ipaddress.ip_address(hostname)
+        address = ipaddress.ip_address(normalized_hostname)
     except ValueError:
         address = None
     if address is not None:
-        return not (
-            address.is_private
-            or address.is_loopback
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_unspecified
-            or address.is_multicast
-        )
-    return "." in hostname and not hostname.lower().endswith(".local")
+        return address.is_global
+    try:
+        ascii_hostname = normalized_hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if len(ascii_hostname) > 253 or ascii_hostname.endswith(".local"):
+        return False
+    labels = ascii_hostname.split(".")
+    return len(labels) > 1 and all(
+        re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is not None
+        for label in labels
+    )
 
 
 def _finding(

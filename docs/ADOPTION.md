@@ -178,6 +178,8 @@ outputs unless an ordinary existing file is deliberately replaced with `--force`
 
 The command is offline, read-only, deterministic, and rejects secret-bearing field
 names so reviewer passwords and tokens are not normalized into project artifacts.
+Privacy and support links must be public HTTPS URLs without credentials, query strings,
+or fragments; this syntactic offline check does not claim the URL is reachable.
 `blocked` exits `1`; `review` and `ready` exit `0`. Every finding includes a stable ID,
 severity, evidence from the manifest, and remediation.
 

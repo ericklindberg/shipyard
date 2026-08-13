@@ -83,6 +83,7 @@ risks without credentials, network access, or App Store Connect mutation:
 ```bash
 shipyard app-review init --output ./app-review.json --json
 # Edit every non-secret submission fact; the untouched scaffold is deliberately blocked.
+# Privacy/support links must be public HTTPS without credentials, query, or fragment.
 shipyard app-review preflight ./app-review.json --json
 ```
 
