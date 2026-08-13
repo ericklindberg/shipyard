@@ -152,6 +152,12 @@ def test_app_review_preflight_ready_is_advisory_and_deterministic(tmp_path, caps
     assert first["findings"] == []
     assert first["approval_guaranteed"] is False
     assert len(first["manifest_sha256"]) == 64
+    limitations = cast(list[str], first["limitations"])
+    assert any(
+        "does not resolve or fetch" in limitation
+        and "anonymous public reachability" in limitation
+        for limitation in limitations
+    )
 
 
 def test_app_review_preflight_rejects_secret_fields(tmp_path, capsys):

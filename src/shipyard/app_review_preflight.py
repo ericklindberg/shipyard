@@ -467,6 +467,8 @@ def assess_app_review_manifest(manifest: Mapping[str, object]) -> dict[str, obje
         "limitations": [
             "This deterministic preflight cannot predict every App Review decision "
             "or guarantee approval.",
+            "It does not resolve or fetch privacy and support URLs; verify anonymous "
+            "public reachability separately.",
             "It evaluates operator-supplied facts and does not inspect a binary, "
             "App Store Connect metadata, legal obligations, or live reviewer access.",
             "Reconcile findings against the current Apple App Review Guidelines before submission.",
