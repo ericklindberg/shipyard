@@ -16,6 +16,20 @@ class SmokeError(RuntimeError):
 
 
 _SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
+_EXPECTED_APP_REVIEW_SCAFFOLD_FINDINGS = {
+    "submission-metadata": "blocker",
+    "current-screenshots": "blocker",
+    "review-notes": "warning",
+    "privacy-policy-url": "blocker",
+    "support-url": "blocker",
+    "privacy-disclosures": "blocker",
+    "privacy-manifest": "warning",
+}
+_EXPECTED_APP_REVIEW_SCAFFOLD_BLOCKERS = {
+    identifier
+    for identifier, severity in _EXPECTED_APP_REVIEW_SCAFFOLD_FINDINGS.items()
+    if severity == "blocker"
+}
 
 
 def _run(
@@ -151,10 +165,33 @@ def smoke(executable: Path, expected_version: str, expected_source_sha: str) -> 
             "app-review", "preflight", str(app_review_manifest),
             accepted_returncodes=(1,),
         )
+        findings = app_review_preflight.get("findings")
+        if not isinstance(findings, list):
+            raise SmokeError("installed App Review preflight findings are malformed")
+        finding_severities: dict[str, str] = {}
+        for finding in findings:
+            if not isinstance(finding, dict):
+                raise SmokeError("installed App Review preflight finding is malformed")
+            identifier = finding.get("id")
+            severity = finding.get("severity")
+            if not isinstance(identifier, str) or not isinstance(severity, str):
+                raise SmokeError("installed App Review finding identity is malformed")
+            if identifier in finding_severities:
+                raise SmokeError("installed App Review preflight duplicated a finding")
+            finding_severities[identifier] = severity
+        blocker_ids = {
+            identifier
+            for identifier, severity in finding_severities.items()
+            if severity == "blocker"
+        }
         if (
             app_review_preflight.get("status") != "blocked"
             or app_review_preflight.get("network_access") is not False
             or app_review_preflight.get("provider_mutations") != 0
+            or app_review_preflight.get("summary")
+            != {"blockers": 5, "warnings": 2, "findings": 7}
+            or finding_severities != _EXPECTED_APP_REVIEW_SCAFFOLD_FINDINGS
+            or blocker_ids != _EXPECTED_APP_REVIEW_SCAFFOLD_BLOCKERS
         ):
             raise SmokeError("installed App Review scaffold was not conservatively blocked")
 

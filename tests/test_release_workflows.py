@@ -85,6 +85,20 @@ def test_installed_smoke_uses_the_runtime_identity_package_version() -> None:
     assert 'app_review.get("network_access") is not False' in smoke
     assert 'app_review.get("provider_mutations") != 0' in smoke
     assert 'stat.S_IMODE(app_review_manifest.stat().st_mode) != 0o600' in smoke
+    assert "_EXPECTED_APP_REVIEW_SCAFFOLD_BLOCKERS" in smoke
+    for blocker_id in (
+        "submission-metadata",
+        "current-screenshots",
+        "privacy-policy-url",
+        "support-url",
+        "privacy-disclosures",
+    ):
+        assert blocker_id in smoke
+    assert 'app_review_preflight.get("summary")' in smoke
+    assert '!= {"blockers": 5, "warnings": 2, "findings": 7}' in smoke
+    assert '"blockers": 5' in smoke
+    assert '"warnings": 2' in smoke
+    assert '"findings": 7' in smoke
     assert 'version.get("version")' not in smoke
     assert (
         'Path(tempfile.mkdtemp(prefix="shipyard-installed-smoke-")).resolve(strict=True)'
