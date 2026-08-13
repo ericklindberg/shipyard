@@ -160,21 +160,34 @@ def load_app_review_manifest(path: str | Path) -> dict[str, object]:
 
 
 def _valid_public_https_url(value: str) -> bool:
-    parsed = urlsplit(value)
+    if not value or any(character.isspace() or ord(character) < 32 for character in value):
+        return False
     try:
+        parsed = urlsplit(value)
         hostname = parsed.hostname
-        address = ipaddress.ip_address(hostname) if hostname else None
+        port = parsed.port
+        username = parsed.username
+        password = parsed.password
     except ValueError:
         return False
-    return (
-        parsed.scheme == "https"
-        and bool(hostname)
-        and (address is None or not (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_unspecified or address.is_multicast))
-        and (address is not None or "." in hostname and not hostname.endswith(".local"))
-        and parsed.username is None
-        and parsed.password is None
-        and not parsed.fragment
-    )
+    if parsed.scheme != "https" or not hostname or port is None and ":" in parsed.netloc:
+        return False
+    if username is not None or password is not None or parsed.query or parsed.fragment:
+        return False
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None:
+        return not (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_unspecified
+            or address.is_multicast
+        )
+    return "." in hostname and not hostname.lower().endswith(".local")
 
 
 def _finding(

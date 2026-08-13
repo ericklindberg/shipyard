@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from shipyard.cli import main
+from shipyard.app_review_preflight import AppReviewPreflightError, load_app_review_manifest
 
 
 def _manifest(**overrides: object) -> dict[str, object]:
@@ -178,14 +180,42 @@ def test_app_review_preflight_rejects_secret_fields(tmp_path, capsys):
     "https://app.local/privacy",
 ])
 def test_app_review_preflight_rejects_non_public_urls(tmp_path, capsys, url):
-    manifest = _manifest(privacy={**_manifest()["privacy"], "privacy_policy_url": url})
+    manifest = _manifest()
+    cast(dict[str, object], manifest["privacy"])["privacy_policy_url"] = url
     path = tmp_path / "app-review.json"
     path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    from shipyard.app_review_preflight import AppReviewPreflightError, load_app_review_manifest
-
     with pytest.raises(AppReviewPreflightError, match="HTTPS URL"):
         load_app_review_manifest(path)
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.com/privacy",
+    "https://8.8.8.8/privacy",
+])
+def test_app_review_preflight_accepts_public_https_urls(tmp_path, url):
+    manifest = _manifest()
+    cast(dict[str, object], manifest["privacy"])["privacy_policy_url"] = url
+    path = tmp_path / "app-review.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert cast(dict[str, object], load_app_review_manifest(path)["privacy"])["privacy_policy_url"] == url
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.com/privacy?access_token=do-not-echo",
+    "https://user:password@example.com/privacy",
+    "https://example.com/privacy#secret-fragment",
+])
+def test_app_review_preflight_rejects_url_secrets_without_echoing(tmp_path, capsys, url):
+    manifest = _manifest()
+    cast(dict[str, object], manifest["privacy"])["privacy_policy_url"] = url
+    path = tmp_path / "app-review.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    code = main(["app-review", "preflight", str(path), "--json"])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert url not in captured.out + captured.err
+    assert "do-not-echo" not in captured.out + captured.err
 
 
 def test_app_review_preflight_can_fail_ci_on_warnings(tmp_path, capsys):
