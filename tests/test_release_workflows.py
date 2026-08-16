@@ -20,16 +20,16 @@ def test_reviewer_install_guidance_does_not_claim_an_unpublished_release():
     assert "current signed release" not in readme
     assert "original wheel filename from the signed GitHub release" not in guide
     assert "https://github.com/ericklindberg/shipyard/releases/latest" in readme
-    assert "https://github.com/ericklindberg/shipyard/pull/1" in readme
+    assert "https://github.com/ericklindberg/shipyard/pull/1" not in readme
     assert "uv sync --extra dev --locked" in readme
     assert "If the release includes GitHub artifact attestations" in readme
     assert "Starting with version 0.6.0" in readme
+    assert "candidate source and local artifacts are not publication claims" in readme
     assert "currently published 0.5.2 wheel reports embedded source identity" not in readme
     assert "<version>" not in readme
     assert "<version>" not in guide
-    assert 'EXPECTED_SHA="replace-with-the-40-character-SHA-from-PR-1"' in readme
-    assert 'test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_SHA"' in readme
-    assert 'git switch --detach "$EXPECTED_SHA"' in readme
+    assert "replace-with-the-40-character-SHA" not in readme
+    assert "git fetch origin pull/1/head" not in readme
 
 
 def test_changelog_does_not_prematurely_date_the_candidate():

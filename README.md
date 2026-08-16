@@ -6,7 +6,7 @@ Shipyard coordinates deployment tools; it does not bypass repository governance,
 
 **Project status:** pre-1.0 beta. The local ledger, exact-SHA authorization, Git/GitHub/Buzz promotion, GitHub Actions adoption, Xcode Cloud/TestFlight internal-canary path, physical-device gate contract, and offline evidence/dossier verifiers are exercised by deterministic tests and release dogfood. OCI, Kubernetes, Render, Heroku, Vercel, and Buzz workflow adapters remain beta pending operator-run live-target validation.
 
-**Review status:** development and review for version 0.6.0 are tracked in [PR #1](https://github.com/ericklindberg/shipyard/pull/1). While that PR is open, its body is the canonical live review record: it identifies the exact candidate SHA, hosted CI, artifact hashes, validation results, and intentionally unavailable provider claims. The [latest published release](https://github.com/ericklindberg/shipyard/releases/latest) is always authoritative for what is publicly released. A package version in candidate source is not by itself a release claim.
+**Review status:** version 0.6.0 is the next local release candidate from the exact `main` commit under review. The [latest published release](https://github.com/ericklindberg/shipyard/releases/latest) is authoritative for what is publicly released; candidate source and local artifacts are not publication claims. Candidate evidence records the exact source SHA, artifact hashes, validation results, and intentionally unavailable provider claims.
 
 ## Why Shipyard
 
@@ -41,21 +41,6 @@ gh attestation verify ./shipyard_release-VERSION-py3-none-any.whl \
 ```
 
 Starting with version 0.6.0, the Linux/macOS release gate installs the canonical wheel with its hash-locked runtime dependencies, requires `shipyard version --json` to report the embedded exact source SHA, and exercises the installed CLI through governed quickstart and aggregate-dossier verification. Shipyard's workflows generate evidence but never publish or deploy automatically.
-
-To inspect version 0.6.0 while PR #1 is still open, use the exact SHA recorded in [the PR body](https://github.com/ericklindberg/shipyard/pull/1):
-
-```bash
-EXPECTED_SHA="replace-with-the-40-character-SHA-from-PR-1"
-git clone https://github.com/ericklindberg/shipyard.git
-cd shipyard
-git fetch origin pull/1/head
-test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_SHA"
-git switch --detach "$EXPECTED_SHA"
-test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-uv sync --extra dev --locked
-uv run shipyard version --json
-uv run shipyard quickstart ./shipyard-quickstart --json
-```
 
 For normal development from a source checkout:
 
