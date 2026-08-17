@@ -6,7 +6,7 @@ Shipyard coordinates deployment tools; it does not bypass repository governance,
 
 **Project status:** pre-1.0 beta. The local ledger, exact-SHA authorization, Git/GitHub/Buzz promotion, GitHub Actions adoption, Xcode Cloud/TestFlight internal-canary path, physical-device gate contract, and offline evidence/dossier verifiers are exercised by deterministic tests and release dogfood. OCI, Kubernetes, Render, Heroku, Vercel, and Buzz workflow adapters remain beta pending operator-run live-target validation.
 
-**Review status:** version 0.6.0 is the next local release candidate from the exact `main` commit under review. The [latest published release](https://github.com/ericklindberg/shipyard/releases/latest) is authoritative for what is publicly released; candidate source and local artifacts are not publication claims. Candidate evidence records the exact source SHA, artifact hashes, validation results, and intentionally unavailable provider claims.
+**Review status:** version 0.6.0 is the next unpublished local release candidate. [PR #1](https://github.com/ericklindberg/shipyard/pull/1) is the canonical live review record and must name both the exact 40-character candidate SHA and its matching immutable `shipyard-candidate-<SHA>` tag. Reviewers use those values to reproduce the candidate; they do not treat a mutable branch as candidate identity. The [latest published release](https://github.com/ericklindberg/shipyard/releases/latest) is authoritative for what is publicly released; candidate source and local artifacts are not publication claims. Candidate evidence records the exact source SHA, artifact hashes, validation results, and intentionally unavailable provider claims.
 
 ## Why Shipyard
 
@@ -41,6 +41,22 @@ gh attestation verify ./shipyard_release-VERSION-py3-none-any.whl \
 ```
 
 Starting with version 0.6.0, the Linux/macOS release gate installs the canonical wheel with its hash-locked runtime dependencies, requires `shipyard version --json` to report the embedded exact source SHA, and exercises the installed CLI through governed quickstart and aggregate-dossier verification. Shipyard's workflows generate evidence but never publish or deploy automatically.
+
+To inspect the unpublished 0.6.0 candidate, copy the exact SHA from [PR #1](https://github.com/ericklindberg/shipyard/pull/1). The review record must also name the matching immutable candidate tag. Do not substitute `main`, a branch tip, or the PR head for these values:
+
+```bash
+EXPECTED_SHA="replace-with-the-40-character-SHA-from-PR-1"
+EXPECTED_TAG="shipyard-candidate-${EXPECTED_SHA}"
+git clone https://github.com/ericklindberg/shipyard.git
+cd shipyard
+git fetch origin "refs/tags/${EXPECTED_TAG}:refs/tags/${EXPECTED_TAG}"
+test "$(git rev-parse "${EXPECTED_TAG}^{commit}")" = "$EXPECTED_SHA"
+git switch --detach "$EXPECTED_SHA"
+test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+uv sync --extra dev --locked
+uv run shipyard version --json
+uv run shipyard quickstart ./shipyard-quickstart --json
+```
 
 For normal development from a source checkout:
 

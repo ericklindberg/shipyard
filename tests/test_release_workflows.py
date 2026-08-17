@@ -20,7 +20,7 @@ def test_reviewer_install_guidance_does_not_claim_an_unpublished_release():
     assert "current signed release" not in readme
     assert "original wheel filename from the signed GitHub release" not in guide
     assert "https://github.com/ericklindberg/shipyard/releases/latest" in readme
-    assert "https://github.com/ericklindberg/shipyard/pull/1" not in readme
+    assert "https://github.com/ericklindberg/shipyard/pull/1" in readme
     assert "uv sync --extra dev --locked" in readme
     assert "If the release includes GitHub artifact attestations" in readme
     assert "Starting with version 0.6.0" in readme
@@ -28,7 +28,12 @@ def test_reviewer_install_guidance_does_not_claim_an_unpublished_release():
     assert "currently published 0.5.2 wheel reports embedded source identity" not in readme
     assert "<version>" not in readme
     assert "<version>" not in guide
-    assert "replace-with-the-40-character-SHA" not in readme
+    assert 'EXPECTED_SHA="replace-with-the-40-character-SHA-from-PR-1"' in readme
+    assert 'EXPECTED_TAG="shipyard-candidate-${EXPECTED_SHA}"' in readme
+    assert 'git fetch origin "refs/tags/${EXPECTED_TAG}:refs/tags/${EXPECTED_TAG}"' in readme
+    assert 'test "$(git rev-parse "${EXPECTED_TAG}^{commit}")" = "$EXPECTED_SHA"' in readme
+    assert 'git switch --detach "$EXPECTED_SHA"' in readme
+    assert "Do not substitute `main`, a branch tip, or the PR head" in readme
     assert "git fetch origin pull/1/head" not in readme
 
 
